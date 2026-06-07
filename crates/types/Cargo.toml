@@ -1,0 +1,16 @@
+[package]
+name = "iikanji-types"
+version = "0.1.0"
+description = "server/client 共有の serde DTO (auth ceremony・key blob・sync push/pull)。財務平文は持たない。"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
