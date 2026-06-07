@@ -15,6 +15,7 @@
 extern crate alloc;
 
 mod chart;
+mod fiscal;
 mod journal;
 mod ledger;
 mod medical;
@@ -24,6 +25,8 @@ mod statements;
 mod tax;
 
 #[cfg(test)]
+mod fiscal_tests;
+#[cfg(test)]
 mod reports_tests;
 #[cfg(test)]
 mod tests;
@@ -31,6 +34,10 @@ mod tests;
 pub use chart::{
     standard_chart, AccountCode, AccountInfo, AccountType, Chart, CostType, Side,
     StandardAccountDef, SystemRole, TaxCategory, STANDARD_CHART_VERSION,
+};
+pub use fiscal::{
+    generate_closing_entry, FiscalClose, FiscalError, MAX_PERIOD, NOT_CLOSED, OPENING_PERIOD,
+    TRANSFER_PERIOD,
 };
 pub use journal::{
     cashbook_to_entry, CashbookInput, CashbookKind, Date, EntryLine, JournalEntry, JournalError,
