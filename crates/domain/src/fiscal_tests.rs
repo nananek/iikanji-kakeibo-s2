@@ -66,6 +66,24 @@ fn close_state_machine_is_forward_only() {
 }
 
 #[test]
+fn close_to_opening_and_transfer_periods() {
+    let fc = FiscalClose::new(2026);
+    // 未確定(-1) → 期首(0) は前方向。
+    let opened = fc.close_to(OPENING_PERIOD).unwrap();
+    assert_eq!(opened.closed_period(), 0);
+    assert!(opened.is_period_locked(0));
+    assert!(!opened.is_period_locked(1));
+    // 期首から損益振替(16)まで一気に確定。
+    let transferred = opened.close_to(TRANSFER_PERIOD).unwrap();
+    assert_eq!(transferred.closed_period(), 16);
+    for p in 0..=16u8 {
+        assert!(transferred.is_period_locked(p));
+    }
+    // 16 から先には進めない。
+    assert_eq!(transferred.close_to(16), Err(FiscalError::NotForward));
+}
+
+#[test]
 fn date_lock_and_modifiable_guard() {
     let fc = FiscalClose::new(2026).close_to(6).unwrap();
     assert!(fc.is_date_locked(Date::new(2026, 5, 10).unwrap())); // 5月 <= 6

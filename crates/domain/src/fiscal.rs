@@ -76,7 +76,10 @@ impl FiscalClose {
         (period as i8) <= self.closed_period
     }
 
-    /// 通常仕訳 (period = 月) がロックされているか。別年は対象外。
+    /// 通常仕訳 (period = 月 1-12) がロックされているか。別年は対象外。
+    ///
+    /// 注意: 決算整理 (13-15)・損益振替 (16) は日付 (month) からは判別できない。これら特殊
+    /// 期間のロックは records 層で明示的な period 情報を用いて判定する (本関数の責務外)。
     pub fn is_date_locked(self, date: Date) -> bool {
         date.year() == self.year && self.is_period_locked(date.month())
     }
@@ -177,6 +180,7 @@ where
         description: "損益振替".to_string(),
         lines,
     };
-    debug_assert!(entry.is_balanced(), "closing entry must balance");
+    // 財務不変条件: 損益振替仕訳は必ず均衡する (release でも保証)。
+    assert!(entry.is_balanced(), "closing entry must balance");
     Ok(Some(entry))
 }
