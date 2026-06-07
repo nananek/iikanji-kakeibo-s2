@@ -14,6 +14,7 @@ hkdf = { workspace = true }
 sha2 = { workspace = true }
 getrandom = { workspace = true }
 zeroize = { workspace = true }
+subtle = { workspace = true }
 thiserror = { workspace = true }
 
 # wasm32-unknown-unknown では getrandom に js バックエンドが必要。

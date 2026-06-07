@@ -2,6 +2,7 @@
 //! チェックサムで人が読める形式に符号化し、Argon2id+HKDF で `RecoveryKey` を導出する。
 
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::{CryptoError, Result};
@@ -64,9 +65,11 @@ impl RecoveryCode {
         let mut entropy = [0u8; ENTROPY_BYTES];
         entropy.copy_from_slice(&decoded);
 
-        // 入力チェック文字を正規化し、期待値と一致するか比較 (タイポ検出)。
+        // 入力チェック文字を正規化し、期待値と定数時間で比較 (タイポ検出)。
+        // タイミング攻撃の脅威は実用上低いが、crate 全体の方針として一貫させる。
         let typed: String = check.chars().map(canon_char).collect::<Result<String>>()?;
-        if typed != checksum(&entropy) {
+        let expected = checksum(&entropy);
+        if !bool::from(typed.as_bytes().ct_eq(expected.as_bytes())) {
             return Err(CryptoError::Recovery("checksum mismatch"));
         }
         Ok(Self { entropy })

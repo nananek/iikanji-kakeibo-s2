@@ -200,6 +200,7 @@ dependencies = [
  "getrandom",
  "hkdf",
  "sha2",
+ "subtle",
  "thiserror",
  "zeroize",
 ]
