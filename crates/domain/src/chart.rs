@@ -67,8 +67,8 @@ impl AccountType {
     }
 }
 
-/// 確定申告の税区分 (集計用)。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// 確定申告の税区分 (集計用)。`Ord` は宣言順 (集計の安定した並びに使う)。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum TaxCategory {
     /// 医療費控除
     Medical,

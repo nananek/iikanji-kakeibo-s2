@@ -1,10 +1,11 @@
 //! 残高ロールアップと試算表。
 
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::chart::{AccountCode, Side};
-use crate::journal::JournalEntry;
+use crate::journal::{Date, JournalEntry};
 use crate::money::Yen;
 
 /// 1 科目の借方・貸方累計。
@@ -57,6 +58,50 @@ where
         }
     }
     map
+}
+
+/// 総勘定元帳の 1 行 (日付順・running balance 付き)。`balance` は正常残高側の累計。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerLine {
+    pub date: Date,
+    pub description: String,
+    pub debit: Yen,
+    pub credit: Yen,
+    pub balance: Yen,
+}
+
+/// 指定科目の総勘定元帳。日付昇順 (同日は入力順) に running balance を計算する。
+pub fn general_ledger<'a, I>(
+    entries: I,
+    account: &AccountCode,
+    normal_balance: Side,
+) -> Vec<LedgerLine>
+where
+    I: IntoIterator<Item = &'a JournalEntry>,
+{
+    let mut refs: Vec<&JournalEntry> = entries.into_iter().collect();
+    refs.sort_by_key(|e| e.date); // 安定ソート: 同日は元の順序を保つ
+    let mut out = Vec::new();
+    let mut balance = Yen::ZERO;
+    for entry in refs {
+        for line in &entry.lines {
+            if &line.account == account {
+                let delta = match normal_balance {
+                    Side::Debit => line.debit - line.credit,
+                    Side::Credit => line.credit - line.debit,
+                };
+                balance += delta;
+                out.push(LedgerLine {
+                    date: entry.date,
+                    description: entry.description.clone(),
+                    debit: line.debit,
+                    credit: line.credit,
+                    balance,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// 試算表を構築する (科目コード昇順)。
