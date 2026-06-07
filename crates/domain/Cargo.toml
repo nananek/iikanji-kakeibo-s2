@@ -1,0 +1,12 @@
+[package]
+name = "iikanji-domain"
+version = "0.1.0"
+description = "純会計ロジック (複式簿記・StandardChart・試算表)。no_std+alloc, I/O 無し。client/server で共有。"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# 第一スライスは外部依存ゼロ (core + alloc のみ)。
+# serde は records 連携 PR で `default-features=false, features=["alloc","derive"]` 追加予定。
