@@ -17,8 +17,13 @@ extern crate alloc;
 mod chart;
 mod journal;
 mod ledger;
+mod medical;
 mod money;
+mod statements;
+mod tax;
 
+#[cfg(test)]
+mod reports_tests;
 #[cfg(test)]
 mod tests;
 
@@ -29,5 +34,15 @@ pub use chart::{
 pub use journal::{
     cashbook_to_entry, CashbookInput, CashbookKind, Date, EntryLine, JournalEntry, JournalError,
 };
-pub use ledger::{account_balances, trial_balance, AccountBalance, TrialBalance};
+pub use ledger::{
+    account_balances, general_ledger, trial_balance, AccountBalance, LedgerLine, TrialBalance,
+};
+pub use medical::{
+    medical_summary, HospitalMedical, MedicalExpense, MedicalSummary, MedicalTotals, PatientMedical,
+};
 pub use money::Yen;
+pub use statements::{
+    balance_sheet, income_expense_summary, income_statement, BalanceSheet, IncomeExpenseSummary,
+    IncomeStatement, LineItem,
+};
+pub use tax::{tax_summary, TaxCategorySummary};
