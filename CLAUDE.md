@@ -55,8 +55,8 @@ signup 時のラップ blob: mk-pw(wrapKey) / mk-recovery(recoveryKey) / dk-wrap
 `chacha20poly1305`(**XChaCha20-Poly1305**) / `hkdf`(HKDF-SHA-256, info でドメイン分離) / `sha2` / `getrandom`(OsRng) /
 `totp-rs` / `webauthn-rs`(server) / `subtle` / `zeroize`。
 
-**Envelope v1**（binary, 版管理）: `magic|version|alg|kdf_id|flags|[salt]|nonce(24)|aad_len|aad|ciphertext(+tag)`。
-AAD に `purpose + record_id + version` を束縛し blob すり替えを復号時に検出。version/alg バイトで将来の鍵ローテに備える。
+**Envelope v1**（binary, 版管理）: `magic("K1")|version|alg|kdf_id|flags|nonce(24)|ciphertext(+16B tag)`。
+AAD = ヘッダ(30B) + 呼び出し側 context(`purpose + record_id + version`)。**AAD は envelope に格納せず open 時に文脈から再構築**するため、blob すり替え（用途取り違え）は復号失敗として必ず検出される。version/alg/kdf_id バイトで将来の鍵ローテ・アルゴリズム更新に備える。実装は `crates/crypto/`（`iikanji-crypto`）。
 
 ## ワークスペース構成（予定 / 段階的に作成）
 
