@@ -7,12 +7,14 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{Duration, Utc};
-use iikanji_crypto::{hash_auth_key, verify_auth_key, AuthKey, KdfParams};
+use iikanji_crypto::{
+    gen_opaque_token, hash_auth_key, hash_token, server_dummy_salt, verify_auth_key, AuthKey,
+    KdfParams,
+};
 use iikanji_types::{
     Factor, LoginBeginRequest, LoginBeginResponse, LoginVerifyRequest, LoginVerifyResponse,
     SignupRequest,
 };
-use sha2::{Digest, Sha256};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -24,19 +26,6 @@ fn auth_key_from(bytes: &[u8]) -> Result<AuthKey, AppError> {
         .try_into()
         .map_err(|_| AppError::BadRequest("auth_key must be 32 bytes"))?;
     Ok(AuthKey::from_wire_bytes(arr))
-}
-
-fn sha256(data: &[u8]) -> Vec<u8> {
-    Sha256::digest(data).to_vec()
-}
-
-/// email から決定的なダミー salt を導出する (未知ユーザーの enumeration 対策)。
-fn dummy_salt(secret: &[u8], email: &str) -> Vec<u8> {
-    let mut h = Sha256::new();
-    h.update(secret);
-    h.update(b"|salt-v1|");
-    h.update(email.as_bytes());
-    h.finalize()[..16].to_vec()
 }
 
 pub async fn health() -> &'static str {
@@ -107,7 +96,7 @@ pub async fn login_begin(
             kdf_version: r.get::<i32, _>("kdf_version") as u8,
         },
         None => LoginBeginResponse {
-            salt_pw: dummy_salt(&st.server_secret, &req.email),
+            salt_pw: server_dummy_salt(&st.server_secret, &req.email).to_vec(),
             kdf_version: KdfParams::INTERACTIVE_V1.version().unwrap_or(1),
         },
     };
@@ -142,11 +131,11 @@ pub async fn login_verify(
 
     let user_id = user_id.ok_or(AppError::Unauthorized)?;
 
-    // 2FA-pending トークンを発行 (ハッシュのみ保存)。blob は 2FA 通過後 (後続 PR)。
-    let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    // 2FA-pending トークンを発行 (OsRng 由来・ハッシュのみ保存)。blob は 2FA 通過後 (後続 PR)。
+    let token = gen_opaque_token();
     let expires = Utc::now() + Duration::minutes(5);
     sqlx::query("INSERT INTO pending_logins (token_hash, user_id, expires_at) VALUES ($1, $2, $3)")
-        .bind(sha256(token.as_bytes()))
+        .bind(hash_token(token.as_bytes()).to_vec())
         .bind(user_id)
         .bind(expires)
         .execute(&st.pool)

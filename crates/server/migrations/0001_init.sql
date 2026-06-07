@@ -16,7 +16,7 @@ CREATE TABLE users (
 -- E2EE ラップ blob (ciphertext)。purpose = 'mk-pw' | 'mk-recovery' | 'dk-wrap'。
 CREATE TABLE key_blobs (
     user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    purpose    TEXT NOT NULL,
+    purpose    TEXT NOT NULL CHECK (purpose IN ('mk-pw', 'mk-recovery', 'dk-wrap')),
     blob       BYTEA NOT NULL,
     version    INT  NOT NULL DEFAULT 1,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -70,6 +70,8 @@ CREATE TABLE enc_records (
     ct_size     INT  NOT NULL DEFAULT 0,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- tombstone でない限り ciphertext は必須。
+    CHECK (tombstone OR ciphertext IS NOT NULL),
     PRIMARY KEY (user_id, record_id)
 );
 CREATE INDEX idx_enc_records_sync ON enc_records (user_id, seq);
