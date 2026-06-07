@@ -218,3 +218,97 @@ fn balance_sheet_identity_holds_over_random_entries() {
         "資産 == 負債 + 純資産 + 当期純利益 が任意の balanced 仕訳集合で成立する"
     );
 }
+
+// ---- monthly: 比較・着地予測 ----
+
+#[test]
+fn weekday_known_dates() {
+    assert_eq!(Date::new(1970, 1, 1).unwrap().weekday(), 4); // 木曜
+    assert_eq!(Date::new(2000, 1, 1).unwrap().weekday(), 6); // 土曜
+    assert_eq!(Date::new(2024, 1, 1).unwrap().weekday(), 1); // 月曜
+}
+
+fn ymd(y: i32, m: u8, day: u8) -> Date {
+    Date::new(y, m, day).unwrap()
+}
+
+#[test]
+fn monthly_comparison_pivot() {
+    let chart = Chart::standard();
+    let entries = vec![
+        exp(ymd(2026, 1, 10), "1020", "5020", 80_000), // 住居費(Fixed) 1月
+        exp(ymd(2026, 1, 15), "1010", "5010", 30_000), // 食費(Variable) 1月
+        exp(ymd(2026, 2, 10), "1020", "5020", 80_000), // 2月
+        exp(ymd(2026, 2, 15), "1010", "5010", 25_000),
+        inc(ymd(2026, 1, 25), "1020", "4010", 300_000), // 給与 1月
+        exp(ymd(2025, 12, 1), "1010", "5010", 99_999),  // 別年 → 除外
+    ];
+    let mc = monthly_comparison(&entries, 2026, &chart);
+
+    assert_eq!(mc.expense_rows.len(), 2); // 5010, 5020
+    let food = &mc.expense_rows[0];
+    assert_eq!(food.code.as_str(), "5010");
+    assert_eq!(food.monthly[0], Yen::new(30_000));
+    assert_eq!(food.monthly[1], Yen::new(25_000));
+    assert_eq!(food.total, Yen::new(55_000));
+    assert_eq!(food.cost_type, Some(CostType::Variable));
+
+    assert_eq!(mc.expense_totals[0], Yen::new(110_000));
+    assert_eq!(mc.expense_totals[1], Yen::new(105_000));
+    assert_eq!(mc.fixed_totals[0], Yen::new(80_000));
+    assert_eq!(mc.variable_totals[1], Yen::new(25_000));
+    assert_eq!(mc.income_totals[0], Yen::new(300_000));
+    assert_eq!(mc.income_rows.len(), 1);
+}
+
+fn find_proj(p: &MonthProjection, code: &str) -> AccountProjection {
+    p.rows
+        .iter()
+        .find(|r| r.code.as_str() == code)
+        .unwrap_or_else(|| panic!("missing {code}"))
+        .clone()
+}
+
+#[test]
+fn project_month_pro_rata_and_fixed() {
+    let chart = Chart::standard();
+    let entries = vec![
+        // 変動費 5010: 6月 1/5/10 日に計 10000、経過 10/30 日
+        exp(ymd(2026, 6, 1), "1010", "5010", 4_000),
+        exp(ymd(2026, 6, 5), "1010", "5010", 3_000),
+        exp(ymd(2026, 6, 10), "1010", "5010", 3_000),
+        // 固定費 5020: 前月(5月)80000、当月(6月1日)80000
+        exp(ymd(2026, 5, 20), "1020", "5020", 80_000),
+        exp(ymd(2026, 6, 1), "1020", "5020", 80_000),
+    ];
+    let p = project_month(&entries, &chart, 2026, 6, 10, ProjectionMethod::ProRata);
+
+    let food = find_proj(&p, "5010");
+    assert_eq!(food.actual, Yen::new(10_000));
+    assert_eq!(food.projected, Yen::new(30_000)); // 10000 * 30 / 10
+
+    let rent = find_proj(&p, "5020");
+    assert_eq!(rent.actual, Yen::new(80_000));
+    assert_eq!(rent.projected, Yen::new(80_000)); // 固定費 → 前月総額
+}
+
+#[test]
+fn project_month_rolling28_and_dow28() {
+    let chart = Chart::standard();
+    // 変動費 5010 を 6月 1〜28 日に毎日 1000 (計 28000)、as_of=28、dim=30
+    let mut entries = Vec::new();
+    for day in 1..=28u8 {
+        entries.push(exp(ymd(2026, 6, day), "1010", "5010", 1_000));
+    }
+
+    let r = project_month(&entries, &chart, 2026, 6, 28, ProjectionMethod::Rolling28);
+    let food_r = find_proj(&r, "5010");
+    assert_eq!(food_r.actual, Yen::new(28_000));
+    // 平均日額 1000 × 残 2 日 = 2000 → 30000
+    assert_eq!(food_r.projected, Yen::new(30_000));
+
+    let dw = project_month(&entries, &chart, 2026, 6, 28, ProjectionMethod::Dow28);
+    let food_d = find_proj(&dw, "5010");
+    // 各曜日平均 1000、残 2 日とも 1000 → 30000
+    assert_eq!(food_d.projected, Yen::new(30_000));
+}
