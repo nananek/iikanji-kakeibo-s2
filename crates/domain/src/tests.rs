@@ -94,6 +94,14 @@ fn date_validation() {
     assert_eq!(Date::new(2026, 0, 1), Err(JournalError::InvalidDate));
     assert_eq!(Date::new(2026, 6, 0), Err(JournalError::InvalidDate));
     assert_eq!(Date::new(2026, 6, 32), Err(JournalError::InvalidDate));
+    // 暦として無効な日付も拒否する。
+    assert_eq!(Date::new(2026, 6, 31), Err(JournalError::InvalidDate)); // 6月は30日まで
+    assert_eq!(Date::new(2026, 2, 30), Err(JournalError::InvalidDate));
+    assert_eq!(Date::new(2026, 2, 29), Err(JournalError::InvalidDate)); // 平年
+    assert!(Date::new(2026, 2, 28).is_ok());
+    assert!(Date::new(2024, 2, 29).is_ok()); // 閏年
+    assert!(Date::new(2000, 2, 29).is_ok()); // 400 で割り切れる閏年
+    assert_eq!(Date::new(1900, 2, 29), Err(JournalError::InvalidDate)); // 100 で割り切れるが 400 では割れない
     let d = Date::new(2026, 6, 7).unwrap();
     assert_eq!((d.year(), d.month(), d.day()), (2026, 6, 7));
 }

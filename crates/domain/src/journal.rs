@@ -17,7 +17,10 @@ pub struct Date {
 
 impl Date {
     pub fn new(year: i32, month: u8, day: u8) -> Result<Date, JournalError> {
-        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        if !(1..=12).contains(&month) {
+            return Err(JournalError::InvalidDate);
+        }
+        if !(1..=days_in_month(year, month)).contains(&day) {
             return Err(JournalError::InvalidDate);
         }
         Ok(Date { year, month, day })
@@ -30,6 +33,24 @@ impl Date {
     }
     pub fn day(self) -> u8 {
         self.day
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
     }
 }
 

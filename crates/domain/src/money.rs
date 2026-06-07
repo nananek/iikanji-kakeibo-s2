@@ -36,9 +36,9 @@ impl Yen {
         self.0 < 0
     }
 
-    /// 絶対値。
+    /// 絶対値。`i64::MIN` (実運用で到達しない額) でのみ panic する。
     pub fn abs(self) -> Yen {
-        Yen(self.0.abs())
+        Yen(self.0.checked_abs().expect("Yen abs overflow (i64::MIN)"))
     }
 
     /// 溢れたら `None`。
