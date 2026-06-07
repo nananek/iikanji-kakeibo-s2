@@ -49,6 +49,14 @@ impl Yen {
     pub fn checked_sub(self, other: Yen) -> Option<Yen> {
         self.0.checked_sub(other.0).map(Yen)
     }
+    /// 整数倍。溢れたら `None`。
+    pub fn checked_mul(self, factor: i64) -> Option<Yen> {
+        self.0.checked_mul(factor).map(Yen)
+    }
+    /// 整数除算 (切り捨て)。0 除算・overflow で `None`。
+    pub fn checked_div(self, divisor: i64) -> Option<Yen> {
+        self.0.checked_div(divisor).map(Yen)
+    }
 }
 
 impl fmt::Debug for Yen {

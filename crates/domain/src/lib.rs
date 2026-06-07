@@ -19,6 +19,7 @@ mod journal;
 mod ledger;
 mod medical;
 mod money;
+mod monthly;
 mod statements;
 mod tax;
 
@@ -41,6 +42,10 @@ pub use medical::{
     medical_summary, HospitalMedical, MedicalExpense, MedicalSummary, MedicalTotals, PatientMedical,
 };
 pub use money::Yen;
+pub use monthly::{
+    monthly_comparison, project_month, AccountProjection, MonthProjection, MonthlyComparison,
+    MonthlyRow, ProjectionMethod,
+};
 pub use statements::{
     balance_sheet, income_expense_summary, income_statement, BalanceSheet, IncomeExpenseSummary,
     IncomeStatement, LineItem,

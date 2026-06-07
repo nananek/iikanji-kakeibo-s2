@@ -34,13 +34,36 @@ impl Date {
     pub fn day(self) -> u8 {
         self.day
     }
+
+    /// Unix epoch (1970-01-01) からの通日。日付差・曜日計算に使う (Howard Hinnant の算法)。
+    pub fn to_days(self) -> i64 {
+        let y0 = self.year as i64;
+        let m = self.month as i64;
+        let d = self.day as i64;
+        let y = if m <= 2 { y0 - 1 } else { y0 };
+        let era = (if y >= 0 { y } else { y - 399 }) / 400;
+        let yoe = y - era * 400; // [0, 399]
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+        era * 146097 + doe - 719468
+    }
+
+    /// 曜日 (0=日曜 .. 6=土曜)。
+    pub fn weekday(self) -> u8 {
+        (self.to_days() + 4).rem_euclid(7) as u8
+    }
+
+    /// その月の日数 (閏年考慮)。
+    pub fn month_length(self) -> u8 {
+        days_in_month(self.year, self.month)
+    }
 }
 
 fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
-fn days_in_month(year: i32, month: u8) -> u8 {
+pub(crate) fn days_in_month(year: i32, month: u8) -> u8 {
     match month {
         2 => {
             if is_leap_year(year) {
