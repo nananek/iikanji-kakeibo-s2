@@ -65,6 +65,39 @@ fn login_dtos_roundtrip() {
 }
 
 #[test]
+fn debug_redacts_secrets() {
+    // auth_key 等の機密はログに出さない (バイト長のみ)。
+    let req = LoginVerifyRequest {
+        email: "a@b.c".into(),
+        auth_key: vec![0xAB; 32],
+    };
+    let s = format!("{req:?}");
+    assert!(s.contains("redacted"), "auth_key must be redacted: {s}");
+    assert!(s.contains("a@b.c"), "non-secret email shown");
+    assert!(!s.contains("171"), "raw byte value must not appear"); // 0xAB
+
+    // session_token / blob も伏せる、sync_cursor は出す。
+    let sess = SessionResponse {
+        session_token: "supersecrettoken".into(),
+        mk_pw: vec![1, 2, 3],
+        dk_wrap: vec![4, 5],
+        sync_cursor: 7,
+    };
+    let s = format!("{sess:?}");
+    assert!(!s.contains("supersecrettoken"), "token must not leak: {s}");
+    assert!(s.contains("redacted"));
+    assert!(s.contains('7'), "sync_cursor shown");
+
+    // KeyBlobs 単体も redact。
+    let blobs = KeyBlobs {
+        mk_pw: vec![9; 60],
+        mk_recovery: vec![8; 60],
+        dk_wrap: vec![7; 60],
+    };
+    assert!(format!("{blobs:?}").contains("redacted"));
+}
+
+#[test]
 fn enc_record_tombstone_has_null_ciphertext() {
     let live = EncRecord {
         record_id: Uuid::from_u128(1),
