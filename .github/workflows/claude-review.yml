@@ -1,0 +1,157 @@
+name: Claude PR review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  claude-review:
+    # Trigger conditions:
+    #   - any PR open/sync/reopen
+    #   - PR review comment mentioning @claude (= 人による mention のみ、
+    #     bot 投稿は除外して self-trigger spam を防ぐ)
+    #   - issue/PR comment mentioning @claude (同上)
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request_review_comment' &&
+       github.event.comment.user.type != 'Bot' &&
+       contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       github.event.comment.user.type != 'Bot' &&
+       contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # `gh pr comment` を allow して Claude が直接 PR conversation に
+          # 投稿できるようにする。default では Bash tool が制限されてて、
+          # action 内蔵の buffered inline comment 経路を Claude が選ばない
+          # ため silent で終わる事案があった。
+          claude_args: '--allowed-tools Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh api:*)'
+          prompt: |
+            この repo (`iikanji-kakeibo-s2`) は、家計簿サービス
+            `iikanji-kakeibo` の **E2EE / Rust 全面再設計版**。複式簿記の
+            家計簿という本質は維持しつつ、根本設計を以下へ転換している:
+
+            - **E2EE** — サーバーは email・認証情報・2FA秘密・ラップ鍵 blob・
+              不透明な同期メタデータ・暗号化添付のみを保持し、財務の平文
+              (日付・金額・科目名・摘要・患者名等) を一切持たない。
+            - **Full Rust SPA (Leptos→WASM) + Rust サーバー (Axum)**。会計
+              ロジックは `crates/domain/` に集約しクライアントで実行。サーバーは
+              「認証付き暗号 blob ストア」に縮退する。
+            - **TOTP 必須 + passkey は第2要素の代替**。1パスワードで login と
+              E2EE MK アンロックの両方 (MK 間接参照)。復旧はオフライン
+              リカバリコード。
+            - 廃止: 顧問(税理士)共有 / 平文前提のサーバー側 REST・OAuth API。
+
+            設計と不変条件は repo の `CLAUDE.md` に集約。レビューは必ず
+            `CLAUDE.md` の「E2EE invariants」を最優先の合否基準とすること。
+
+            この PR を以下の観点でレビューしてほしい。
+
+            ### 🔐 E2EE 不変条件 (最優先・違反は block)
+            - サーバー (`crates/server/`) が財務の平文を受信/保存していないか。
+              `enc_records.ciphertext` の外に業務データ (日付・金額・科目名・
+              摘要・患者名・取引先) を置く変更は設計違反。
+            - **MK / DK / wrapKey / recovery code がサーバーへ送信されていないか**
+              (リクエスト body・ログ・エラーメッセージ含む)。サーバーが受け取って
+              よいのは ciphertext (ラップ blob) と認証材料のみ。
+            - passkey / TOTP を復号鍵として使っていないか。これらはセッション/
+              アクセスを gate するだけで、鍵ツリー (PMK→MK→DK) から分離されて
+              いること。
+            - 2FA 通過前に wrapped-MK / DK blob・同期データを返していないか。
+            - クライアントの計算結果 (残高・レポート) をサーバーに送って保存して
+              いないか。BalanceCache はクライアント派生キャッシュのみで同期しない。
+
+            ### 🔑 暗号実装
+            - 暗号は `crates/crypto/` の API 経由か。view/handler で直接 nonce や
+              AEAD を組んでいないか。Envelope の AAD 束縛 (purpose + record_id +
+              version) を外していないか。
+            - nonce は乱数 (XChaCha20-Poly1305) か。nonce 再利用・固定 nonce が
+              ないか。鍵・nonce を OS CSPRNG (`getrandom`/`OsRng`) 以外から
+              導出していないか。
+            - 鍵素材を `zeroize` でゼロ化しているか。`Debug`/log に鍵が漏れて
+              いないか。
+            - Argon2id パラメータ・`kdf_version` の取り扱いが一貫しているか。
+            - 認証は Bitwarden 方式 (client-derived authKey + server-side slow
+              hash)。サーバーが生パスワードや wrapKey を学習する経路がないか。
+            - 定数時間比較 (`subtle`) を認証材料の比較に使っているか。
+
+            ### 📒 複式簿記の整合性 (`crates/domain/`)
+            - 仕訳を作る/変更する箇所で借方合計 == 貸方合計か。
+            - 金額は整数 (円, `i64` / checked Decimal)。**float 厳禁**。集計で
+              オーバーフローしないか。
+            - `fiscal_period` の取り扱い (0=期首, 1-12=月, 13-15=決算整理,
+              16=損益振替は自動生成専用)。
+            - 月次確定 (fiscal-close) 済み期間の仕訳が追加・変更・削除できないよう
+              client 側 immutability 規則で保護されているか。
+            - 標準勘定科目は `StandardChart vN` カタログ + ユーザー差分の merge か。
+              差分を勝手に全件 seed していないか。
+
+            ### 🔄 マルチデバイス同期 (`crates/server/sync`, `crates/client/sync`)
+            - push は `expected_version` 付き CAS か。サーバーが
+              `UPDATE ... WHERE version=$expected` で楽観排他しているか。
+            - `seq` は per-user 単調カウンタ (`user_seq.next_seq`) か。グローバル
+              SERIAL を使っていないか (横断 volume 漏洩)。
+            - fiscal-close は `closed_period = max(local, remote)` の単調マージか
+              (素朴 LWW になっていないか)。
+            - tombstone GC 地平より古いカーソルに `426 Resync` を返すか。
+            - 削除は tombstone か。物理削除で同期が壊れないか。
+
+            ### 🖥️ クライアント (`crates/client/`)
+            - DK/MK を IndexedDB に平文保存していないか (メモリのみが原則)。
+            - AI 証憑仕訳がユーザー自身の鍵で provider を直叩きしているか。画像/
+              平文を自社サーバーに送る経路が混入していないか。
+            - Leptos signal の購読リーク・無限再計算がないか。
+
+            ### 🧪 テスト
+            - `crates/domain/` の会計ロジックに property/golden test があるか
+              (借方==貸方、残高ロールアップ、予測関数)。
+            - `crates/crypto/` に KAT (Envelope ラウンドトリップ、AAD 改竄検出、
+              recovery codec) があるか。
+            - 認証/2FA フロー・同期競合の統合テストが同 PR にあるか。
+            - **E2EE 境界テスト**: DB ダンプに財務平文が現れないことを保証する
+              テストを壊していないか。
+
+            ### 🦀 Rust / コード品質一般
+            - secrets (秘密鍵 / トークン / `.env` 等) が差分に紛れていないか。
+            - `unwrap()`/`expect()`/`panic!` がサーバーのリクエスト経路や暗号
+              経路に無いか (鍵処理は特に)。`unsafe` の追加に正当性があるか。
+            - 不要な依存追加がないか。GPL/AGPL/SSPL 系ライセンスが混入して
+              いないか。新クレートが wasm32 ビルドを壊さないか (`domain` は
+              I/O・プラットフォーム依存禁止)。
+            - dead code / TODO の付け足し、既存パターンとの不整合がないか。
+
+            **Output (必須)**:
+            review summary を **必ず top-level PR comment として post** すること。
+            silent で終わらない。手順:
+
+            1. Review 内容を markdown でまとめる (= verdict 行 + 観点別の
+               OK/NG 表 + 補足説明)
+            2. 投稿:
+               `gh pr comment <PR_NUMBER> --body "<review markdown>"`
+               (PR_NUMBER は `gh pr list --head <branch> --json number` で取得)
+            3. 1 行目に **verdict: approve / request-changes / block** の
+               いずれかを必ず入れる。E2EE 不変条件違反があれば必ず block。
+            4. 行依存の finding があれば追加で
+               `gh pr review <N> --comment --body "..."` で個別 line comment
+               (= 任意、無くてもよい)
+
+            日本語で書くこと。
