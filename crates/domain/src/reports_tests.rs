@@ -312,3 +312,27 @@ fn project_month_rolling28_and_dow28() {
     // 各曜日平均 1000、残 2 日とも 1000 → 30000
     assert_eq!(food_d.projected, Yen::new(30_000));
 }
+
+#[test]
+fn project_month_dow28_is_weekday_aware() {
+    let chart = Chart::standard();
+    // 前提: 2026-06-07 は日曜、6/29・30 は月・火。
+    assert_eq!(ymd(2026, 6, 7).weekday(), 0);
+    assert_eq!(ymd(2026, 6, 29).weekday(), 1);
+    assert_eq!(ymd(2026, 6, 30).weekday(), 2);
+
+    // 日曜だけに 7000 を計上 (6/7,14,21,28)。窓 = 6/1..28。
+    let entries = vec![
+        exp(ymd(2026, 6, 7), "1010", "5010", 7_000),
+        exp(ymd(2026, 6, 14), "1010", "5010", 7_000),
+        exp(ymd(2026, 6, 21), "1010", "5010", 7_000),
+        exp(ymd(2026, 6, 28), "1010", "5010", 7_000),
+    ];
+
+    // Rolling28: 平均日額 28000/28=1000 × 残 2 日 = +2000 → 30000
+    let r = project_month(&entries, &chart, 2026, 6, 28, ProjectionMethod::Rolling28);
+    assert_eq!(find_proj(&r, "5010").projected, Yen::new(30_000));
+    // Dow28: 残り 2 日 (月・火) は日曜平均の対象外 → +0 → 28000 (Rolling28 と異なる)
+    let d = project_month(&entries, &chart, 2026, 6, 28, ProjectionMethod::Dow28);
+    assert_eq!(find_proj(&d, "5010").projected, Yen::new(28_000));
+}

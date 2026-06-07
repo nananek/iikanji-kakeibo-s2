@@ -213,31 +213,36 @@ where
             Some(CostType::Fixed) => prev.get(&code).copied().unwrap_or(actual),
             // 随時費・区分なし: 外挿しない。
             Some(CostType::Occasional) | None => actual,
-            // 変動費: 手法で外挿。
+            // 変動費: 手法で外挿。金額演算は checked (money.rs の方針に合わせる)。
+            // overflow は家計簿の実運用値では到達しない (expect)。
             Some(CostType::Variable) => match method {
-                ProjectionMethod::ProRata => {
-                    Yen::new(actual.amount() * dim as i64 / as_of_day as i64)
-                }
+                ProjectionMethod::ProRata => actual
+                    .checked_mul(dim as i64)
+                    .and_then(|v| v.checked_div(as_of_day as i64))
+                    .expect("ProRata projection overflow"),
                 ProjectionMethod::Rolling28 => {
                     let avg_daily = trailing_total
                         .get(&code)
                         .copied()
                         .unwrap_or(Yen::ZERO)
-                        .amount()
-                        / 28;
-                    Yen::new(actual.amount() + avg_daily * remaining)
+                        .checked_div(28)
+                        .expect("28 is nonzero");
+                    actual
+                        + avg_daily
+                            .checked_mul(remaining)
+                            .expect("Rolling28 overflow")
                 }
                 ProjectionMethod::Dow28 => {
                     let by = trailing_dow.get(&code).copied().unwrap_or([Yen::ZERO; 7]);
-                    let mut add = 0i64;
+                    let mut add = Yen::ZERO;
                     for day in (as_of_day + 1)..=dim {
                         let wd = Date::new(year, month, day)
                             .expect("valid day in month")
                             .weekday() as usize;
                         // 28 日窓では各曜日が 4 回 → 平均 = 合計 / 4。
-                        add += by[wd].amount() / 4;
+                        add += by[wd].checked_div(4).expect("4 is nonzero");
                     }
-                    Yen::new(actual.amount() + add)
+                    actual + add
                 }
             },
         };
