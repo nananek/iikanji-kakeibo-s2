@@ -110,6 +110,48 @@ async fn push_pull_cas_roundtrip() {
 }
 
 #[tokio::test]
+async fn tombstone_push_and_pull() {
+    let app = test_app().await;
+    let token = authenticate(&app).await;
+    let rid = Uuid::from_u128(42);
+
+    // 作成 → v1
+    let (_, r) = request(
+        &app,
+        "POST",
+        "/sync/push",
+        Some(&token),
+        Some(&push_body(vec![change(rid, 0, vec![1, 2, 3])])),
+    )
+    .await;
+    assert_eq!(r["results"][0]["new_version"], 1);
+
+    // tombstone (expected_version 1, ciphertext なし) → v2
+    let tomb = PushChange {
+        record_id: rid,
+        record_type: 1,
+        expected_version: 1,
+        tombstone: true,
+        ciphertext: None,
+    };
+    let (_, r) = request(
+        &app,
+        "POST",
+        "/sync/push",
+        Some(&token),
+        Some(&push_body(vec![tomb])),
+    )
+    .await;
+    assert_eq!(r["results"][0]["status"], "applied");
+    assert_eq!(r["results"][0]["new_version"], 2);
+
+    // pull → tombstone=true, ciphertext=null
+    let (_, p) = request(&app, "GET", "/sync/pull?since=0", Some(&token), None).await;
+    assert_eq!(p["records"][0]["tombstone"], true);
+    assert_eq!(p["records"][0]["ciphertext"], Value::Null);
+}
+
+#[tokio::test]
 async fn e2ee_boundary_no_plaintext_reaches_db() {
     let app = test_app().await;
     let token = authenticate(&app).await;
@@ -117,10 +159,11 @@ async fn e2ee_boundary_no_plaintext_reaches_db() {
 
     // クライアントが暗号化したレコードを push する (サーバーは平文を一切受け取らない)。
     let dk = DataKey::generate();
-    let id = [9u8; 16];
+    // record_id は per-user PK で大域一意ではない。直読みクエリのため run ごとに一意化する。
+    let rid = Uuid::new_v4();
+    let id = *rid.as_bytes();
     let plaintext = b"PATIENT:John Doe|amount:99999|date:2026-06-08";
     let ct = encrypt_record(&dk, 4, &id, 1, plaintext);
-    let rid = Uuid::from_bytes(id);
 
     let ch = PushChange {
         record_id: rid,

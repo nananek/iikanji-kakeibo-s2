@@ -18,16 +18,35 @@ use crate::AppState;
 
 const DEFAULT_PULL_LIMIT: i64 = 500;
 const MAX_PULL_LIMIT: i64 = 1000;
+const MAX_PUSH_BATCH: usize = 500;
+/// `ct_size` のバケット幅 (B)。size メタデータの漏洩緩和。
+const SIZE_BUCKET: usize = 256;
 
-fn row_to_record(row: &PgRow) -> EncRecord {
-    EncRecord {
+/// 保存する `ct_size` をバケットへ丸める。
+///
+/// 注意: 真のサイズ秘匿は**クライアント側で平文をバケットへパディングしてから暗号化**する
+/// ことで達成される (ciphertext 長そのものが信号源)。本関数はサーバー保持メタデータ
+/// (quota 用) の丸めに留まる。
+fn bucketed_ct_size(ciphertext: Option<&Vec<u8>>) -> i32 {
+    match ciphertext {
+        Some(c) if !c.is_empty() => (c.len().div_ceil(SIZE_BUCKET) * SIZE_BUCKET) as i32,
+        _ => 0,
+    }
+}
+
+fn seq_u64(seq: i64) -> Result<u64, AppError> {
+    u64::try_from(seq).map_err(|_| AppError::Internal)
+}
+
+fn row_to_record(row: &PgRow) -> Result<EncRecord, AppError> {
+    Ok(EncRecord {
         record_id: row.get("record_id"),
         record_type: row.get::<i16, _>("record_type") as u16,
         version: row.get::<i32, _>("version") as u32,
-        seq: row.get::<i64, _>("seq") as u64,
+        seq: seq_u64(row.get::<i64, _>("seq"))?,
         tombstone: row.get("tombstone"),
         ciphertext: row.get::<Option<Vec<u8>>, _>("ciphertext"),
-    }
+    })
 }
 
 /// push: 各変更を CAS で適用する。新規は `expected_version=0`、更新は現行 version と一致が条件。
@@ -36,6 +55,9 @@ pub async fn push(
     user: AuthUser,
     Json(req): Json<PushRequest>,
 ) -> Result<Json<PushResponse>, AppError> {
+    if req.changes.len() > MAX_PUSH_BATCH {
+        return Err(AppError::BadRequest("too many changes in single push"));
+    }
     let user_id = user.0;
     let mut tx = st.pool.begin().await?;
     let mut results = Vec::with_capacity(req.changes.len());
@@ -46,11 +68,7 @@ pub async fn push(
                 "non-tombstone change requires ciphertext",
             ));
         }
-        let ct_size = change
-            .ciphertext
-            .as_ref()
-            .map(|c| c.len() as i32)
-            .unwrap_or(0);
+        let ct_size = bucketed_ct_size(change.ciphertext.as_ref());
 
         // 対象行をロックして現状を確認 (seq の無駄消費を避けるため CAS 判定を先に行う)。
         let current = sqlx::query(
@@ -84,27 +102,28 @@ pub async fn push(
                 .bind(ct_size)
                 .execute(&mut *tx)
                 .await?;
-                results.push(applied(change.record_id, 1, seq as u64));
+                results.push(applied(change.record_id, 1, seq_u64(seq)?));
             }
             Some(row) => {
                 let cur_version = row.get::<i32, _>("version") as u32;
                 if cur_version != change.expected_version {
-                    let seq = row.get::<i64, _>("seq") as u64;
+                    let seq = seq_u64(row.get::<i64, _>("seq"))?;
                     results.push(conflict(
                         change.record_id,
                         cur_version,
                         seq,
-                        Some(row_to_record(&row)),
+                        Some(row_to_record(&row)?),
                     ));
                     continue;
                 }
                 let seq = alloc_seq(&mut tx, user_id).await?;
                 let new_version = change.expected_version + 1;
+                // version 条件も付け、ロック + アプリ CAS に DB レベルの安全網を重ねる。
                 sqlx::query(
                     "UPDATE enc_records \
                      SET record_type = $3, version = $4, seq = $5, tombstone = $6, \
                          ciphertext = $7, ct_size = $8, updated_at = now() \
-                     WHERE user_id = $1 AND record_id = $2",
+                     WHERE user_id = $1 AND record_id = $2 AND version = $9",
                 )
                 .bind(user_id)
                 .bind(change.record_id)
@@ -114,9 +133,10 @@ pub async fn push(
                 .bind(change.tombstone)
                 .bind(change.ciphertext.as_deref())
                 .bind(ct_size)
+                .bind(change.expected_version as i32)
                 .execute(&mut *tx)
                 .await?;
-                results.push(applied(change.record_id, new_version, seq as u64));
+                results.push(applied(change.record_id, new_version, seq_u64(seq)?));
             }
         }
     }
@@ -136,12 +156,15 @@ pub struct PullQuery {
 }
 
 /// pull: `since` より大きい seq のレコードを昇順で返す (incremental)。
+///
+/// TODO: tombstone GC 地平より古い `since` には `426 Resync Required` を返す
+/// (tombstone GC プロセス実装時に追加。現状 GC は未実装なので削除を見落とさない)。
 pub async fn pull(
     State(st): State<AppState>,
     user: AuthUser,
     Query(q): Query<PullQuery>,
 ) -> Result<Json<PullResponse>, AppError> {
-    let since = q.since.unwrap_or(0);
+    let since = q.since.unwrap_or(0).max(0);
     let limit = q
         .limit
         .unwrap_or(DEFAULT_PULL_LIMIT)
@@ -162,8 +185,8 @@ pub async fn pull(
         .iter()
         .take(limit as usize)
         .map(row_to_record)
-        .collect();
-    let next_cursor = records.last().map(|r| r.seq).unwrap_or(since.max(0) as u64);
+        .collect::<Result<_, _>>()?;
+    let next_cursor = records.last().map(|r| r.seq).unwrap_or(since as u64);
     Ok(Json(PullResponse {
         records,
         next_cursor,
@@ -171,15 +194,18 @@ pub async fn pull(
     }))
 }
 
-/// cursor: per-user の現在カーソル (= 最新 seq)。
+/// cursor: per-user の現在カーソル (= 最新 seq)。読み取りのみ。
 pub async fn cursor(
     State(st): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<CursorResponse>, AppError> {
-    let mut tx = st.pool.begin().await?;
-    let cursor = current_cursor(&mut tx, user.0).await?;
-    tx.commit().await?;
-    Ok(Json(CursorResponse { cursor }))
+    let cursor: i64 = sqlx::query_scalar("SELECT next_seq - 1 FROM user_seq WHERE user_id = $1")
+        .bind(user.0)
+        .fetch_one(&st.pool)
+        .await?;
+    Ok(Json(CursorResponse {
+        cursor: seq_u64(cursor)?,
+    }))
 }
 
 /// per-user 単調 seq を 1 つ確保して返す (`user_seq.next_seq` をアトミックに前進)。
@@ -204,7 +230,7 @@ async fn current_cursor(
         .bind(user_id)
         .fetch_one(&mut **tx)
         .await?;
-    Ok(cursor as u64)
+    seq_u64(cursor)
 }
 
 fn applied(record_id: Uuid, new_version: u32, seq: u64) -> PushResult {
