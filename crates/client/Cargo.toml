@@ -9,5 +9,7 @@ publish = false
 
 [dependencies]
 iikanji-crypto = { path = "../crypto" }
+iikanji-domain = { path = "../domain", features = ["serde"] }
 iikanji-types = { path = "../types" }
+uuid = { workspace = true }
 zeroize = { workspace = true }

@@ -10,5 +10,9 @@
 #![forbid(unsafe_code)]
 
 mod crypto_glue;
+mod records;
+mod sync;
 
 pub use crypto_glue::{build_signup, derive_login, unlock_data_key, LoginKeys, SignupOutput};
+pub use records::{open_record, seal_record, RecordCryptoError};
+pub use sync::{reconcile, resolve, RemoteRecord};
