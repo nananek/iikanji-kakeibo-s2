@@ -22,5 +22,8 @@ serde_json = { workspace = true }
 leptos = { workspace = true }
 console_error_panic_hook = { workspace = true }
 gloo-net = { version = "0.6", default-features = false, features = ["http"] }
+# Argon2id を Web Worker で回す (メインスレッドを塞がない)。oneshot worker は futures feature。
+gloo-worker = { version = "0.6", features = ["futures"] }
+futures = { version = "0.3", default-features = false }
 # Uuid::new_v4() の乱数源 (wasm32 では js バックエンドが必要)。
 uuid = { workspace = true, features = ["js"] }
