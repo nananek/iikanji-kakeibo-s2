@@ -1,0 +1,16 @@
+# ビルドに不要 / ホスト生成物を除外 (ビルドコンテキストを小さく保つ)。
+/target
+/dist
+/node_modules
+/test-results
+/playwright-report
+/.playwright
+.git
+.github
+tests/e2e
+playwright.config.ts
+package.json
+package-lock.json
+tools
+**/*.rs.bk
+*.pdb
