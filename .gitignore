@@ -2,3 +2,8 @@
 /dist
 **/*.rs.bk
 *.pdb
+# node / Playwright (e2e)
+/node_modules
+/test-results
+/playwright-report
+/.playwright

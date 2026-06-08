@@ -74,8 +74,8 @@ jobs:
       - name: Build domain (serde/records) for wasm
         run: cargo build --target wasm32-unknown-unknown -p iikanji-domain --features serde
 
-  # E2E: Leptos client 実装までは scaffold (spec が無ければ green で通す)。
-  # tests/e2e/*.spec.* が追加された時点で Playwright を自動実行する。
+  # E2E: Trunk で SPA をビルド→静的配信し、Playwright (Firefox) で実ブラウザ検証する。
+  # tests/e2e/*.spec.* が無い間は scaffold (green) のまま。
   e2e:
     name: e2e
     runs-on: ubuntu-latest
@@ -89,17 +89,41 @@ jobs:
           else
             echo "have_specs=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Install Rust (wasm32)
+        if: steps.detect.outputs.have_specs == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        if: steps.detect.outputs.have_specs == 'true'
+      - name: Install Trunk
+        if: steps.detect.outputs.have_specs == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+      - name: Build SPA (trunk --release)
+        if: steps.detect.outputs.have_specs == 'true'
+        run: trunk build --release
       - name: Setup Node
         if: steps.detect.outputs.have_specs == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: npm
       - name: Run Playwright E2E
         if: steps.detect.outputs.have_specs == 'true'
         run: |
-          npm ci
+          npm ci --include=dev
           npx playwright install --with-deps firefox
           npx playwright test
+      - name: Upload Playwright report
+        if: ${{ !cancelled() && steps.detect.outputs.have_specs == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: No E2E specs yet (scaffold)
         if: steps.detect.outputs.have_specs != 'true'
-        run: echo "E2E スペック未追加 (Leptos client 実装まで scaffold)。client 追加時に Playwright を有効化する。"
+        run: echo "E2E スペック未追加 (scaffold)。tests/e2e/*.spec.* 追加で Playwright を有効化する。"

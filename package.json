@@ -1,0 +1,14 @@
+{
+  "name": "iikanji-kakeibo-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Playwright E2E for いいかんじ™家計簿 SPA (Leptos/Trunk dist を静的配信して検証)",
+  "type": "module",
+  "scripts": {
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.1",
+    "http-server": "^14.1.1"
+  }
+}
