@@ -43,8 +43,8 @@ test('create a journal entry and see it persisted via E2EE sync', async ({ page 
   const memo = `ランチ-${Math.floor(Math.random() * 1e6)}`;
   await page.getByTestId('je-date').fill('2026-06-08');
   await page.getByTestId('je-desc').fill(memo);
-  await page.getByTestId('je-debit').fill('5010');
-  await page.getByTestId('je-credit').fill('1010');
+  await page.getByTestId('je-debit').selectOption('5010'); // 食費
+  await page.getByTestId('je-credit').selectOption('1010'); // 現金
   await page.getByTestId('je-amount').fill('1280');
   await page.getByTestId('je-submit').click();
 
@@ -52,6 +52,10 @@ test('create a journal entry and see it persisted via E2EE sync', async ({ page 
   const table = page.getByTestId('entries');
   await expect(table).toContainText(memo, { timeout: 15_000 });
   await expect(table).toContainText('1280');
+
+  // 科目コードが StandardChart の名称で表示される (借方 食費 / 貸方 現金)。
+  await expect(table).toContainText('食費');
+  await expect(table).toContainText('現金');
 
   // 明示的な再読込でも pull+open 経路で残ること (= サーバー側の暗号化永続を確認)。
   await page.getByTestId('reload').click();
