@@ -155,6 +155,32 @@ pub fn cursor_request() -> ApiRequest {
     }
 }
 
+/// login_token のみを運ぶ本体 (passkey auth/begin・auth/finish 共通の先頭フィールド)。
+#[derive(Serialize)]
+struct LoginTokenBody<'a> {
+    login_token: &'a str,
+}
+
+/// `POST /auth/passkey/register/begin` (要セッション = TOTP gate 済み。本体なし)。
+pub fn passkey_register_begin_request() -> ApiRequest {
+    ApiRequest {
+        method: Method::Post,
+        path: "/auth/passkey/register/begin".to_string(),
+        body: None,
+        needs_auth: true,
+    }
+}
+
+/// `POST /auth/passkey/auth/begin` (login_token を提示、セッション不要)。
+pub fn passkey_auth_begin_request(login_token: &str) -> Result<ApiRequest, ApiError> {
+    Ok(ApiRequest {
+        method: Method::Post,
+        path: "/auth/passkey/auth/begin".to_string(),
+        body: Some(to_json(&LoginTokenBody { login_token })?),
+        needs_auth: false,
+    })
+}
+
 // ---- レスポンス解釈 (純粋) ----
 
 fn status_error(status: u16, body: &str) -> ApiError {
@@ -201,6 +227,24 @@ mod wasm_client {
         LoginBeginResponse, LoginVerifyResponse, SessionResponse, SignupResponse,
     };
     use iikanji_types::sync::{CursorResponse, PullResponse, PushResponse};
+    use webauthn_rs_proto::{
+        CreationChallengeResponse, PublicKeyCredential, RegisterPublicKeyCredential,
+        RequestChallengeResponse,
+    };
+
+    /// passkey 登録完了の本体 (server `PasskeyRegisterFinishRequest` に対応)。
+    #[derive(Serialize)]
+    struct RegisterFinishBody<'a> {
+        credential: &'a RegisterPublicKeyCredential,
+        nickname: Option<&'a str>,
+    }
+
+    /// passkey 認証完了の本体 (server `PasskeyAuthFinishRequest` に対応)。
+    #[derive(Serialize)]
+    struct AuthFinishBody<'a> {
+        login_token: &'a str,
+        credential: &'a PublicKeyCredential,
+    }
 
     /// ブラウザ fetch によるサーバークライアント。session_token を保持する (メモリのみ)。
     ///
@@ -312,6 +356,59 @@ mod wasm_client {
         pub async fn cursor(&self) -> Result<CursorResponse, ApiError> {
             self.send_json(cursor_request()).await
         }
+
+        // ---- passkey 第2要素 (proto 型を直接授受) ----
+
+        /// passkey 登録 challenge を得る (要セッション)。
+        pub async fn passkey_register_begin(&self) -> Result<CreationChallengeResponse, ApiError> {
+            self.send_json(passkey_register_begin_request()).await
+        }
+
+        /// attestation を提示して passkey 登録を完了する (要セッション)。
+        pub async fn passkey_register_finish(
+            &self,
+            credential: &RegisterPublicKeyCredential,
+            nickname: Option<&str>,
+        ) -> Result<(), ApiError> {
+            let req = ApiRequest {
+                method: Method::Post,
+                path: "/auth/passkey/register/finish".to_string(),
+                body: Some(to_json(&RegisterFinishBody {
+                    credential,
+                    nickname,
+                })?),
+                needs_auth: true,
+            };
+            let (status, body) = self.execute(req).await?;
+            parse_empty(status, &body)
+        }
+
+        /// passkey 認証 challenge を得る (login_token を提示、セッション不要)。
+        pub async fn passkey_auth_begin(
+            &self,
+            login_token: &str,
+        ) -> Result<RequestChallengeResponse, ApiError> {
+            self.send_json(passkey_auth_begin_request(login_token)?)
+                .await
+        }
+
+        /// assertion を提示して 2FA を通し、`SessionResponse` (session + MK/DK blob) を得る。
+        pub async fn passkey_auth_finish(
+            &self,
+            login_token: &str,
+            credential: &PublicKeyCredential,
+        ) -> Result<SessionResponse, ApiError> {
+            let req = ApiRequest {
+                method: Method::Post,
+                path: "/auth/passkey/auth/finish".to_string(),
+                body: Some(to_json(&AuthFinishBody {
+                    login_token,
+                    credential,
+                })?),
+                needs_auth: false,
+            };
+            self.send_json(req).await
+        }
     }
 }
 
@@ -406,6 +503,24 @@ mod tests {
         .unwrap();
         assert_eq!(twofa.path, "/auth/2fa/totp");
         assert!(!twofa.needs_auth);
+    }
+
+    #[test]
+    fn passkey_begin_builders_target_correct_paths_and_auth() {
+        // 登録 begin は要セッション (TOTP gate 済み) かつ本体なし。
+        let reg = passkey_register_begin_request();
+        assert_eq!(reg.method, Method::Post);
+        assert_eq!(reg.path, "/auth/passkey/register/begin");
+        assert!(reg.needs_auth);
+        assert!(reg.body.is_none());
+
+        // 認証 begin は login 途中なのでセッション不要、login_token を本体で運ぶ。
+        let auth = passkey_auth_begin_request("tok").unwrap();
+        assert_eq!(auth.method, Method::Post);
+        assert_eq!(auth.path, "/auth/passkey/auth/begin");
+        assert!(!auth.needs_auth);
+        let body: serde_json::Value = serde_json::from_str(auth.body.as_ref().unwrap()).unwrap();
+        assert_eq!(body["login_token"], "tok");
     }
 
     #[test]

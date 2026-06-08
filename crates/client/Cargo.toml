@@ -27,3 +27,19 @@ gloo-worker = { version = "0.6", features = ["futures"] }
 futures = { version = "0.3", default-features = false }
 # Uuid::new_v4() の乱数源 (wasm32 では js バックエンドが必要)。
 uuid = { workspace = true, features = ["js"] }
+# WebAuthn (passkey)。proto(wasm) が CreationChallengeResponse↔web_sys の From 変換を提供。
+# web-sys の Window/Navigator/CredentialsContainer/Credential は proto が有効化しないため明示追加
+# (proto は CredentialCreationOptions/RequestOptions/PublicKeyCredential 側を有効化する)。
+webauthn-rs-proto = { workspace = true, features = ["wasm"] }
+web-sys = { workspace = true, features = [
+    "Window",
+    "Navigator",
+    "CredentialsContainer",
+    "Credential",
+    "PublicKeyCredential",
+    "CredentialCreationOptions",
+    "CredentialRequestOptions",
+] }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }

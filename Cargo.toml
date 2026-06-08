@@ -46,3 +46,13 @@ http-body-util = "0.1"
 # client (Leptos CSR → WASM)。client crate のみが wasm32 で参照する。
 leptos = { version = "0.8", features = ["csr"] }
 console_error_panic_hook = "0.1"
+# WebAuthn (passkey 第2要素)。server は native で webauthn-rs を、client は wasm32 で
+# webauthn-rs-proto(wasm) + web-sys を参照する。passkey は鍵ツリー外でセッションを gate
+# するだけで復号鍵ではない (CLAUDE.md invariant 3)。
+# wasm-bindgen は CI 固定の wasm-bindgen-cli@0.2.122 と一致させる (bump 時は ci.yml も更新)。
+webauthn-rs = "0.5"
+webauthn-rs-proto = "0.5"
+web-sys = "0.3"
+js-sys = "0.3"
+wasm-bindgen = "0.2.122"
+wasm-bindgen-futures = "0.4"

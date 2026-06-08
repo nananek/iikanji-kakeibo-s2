@@ -12,11 +12,14 @@ mod error;
 mod session;
 mod sync;
 
+use std::sync::Arc;
+
 use axum::routing::{get, post};
 use axum::Router;
 use iikanji_crypto::{derive_server_key, hash_auth_key, AuthKey, KdfParams};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use webauthn_rs::prelude::{Url, Webauthn, WebauthnBuilder};
 
 pub use config::Config;
 pub use error::AppError;
@@ -30,21 +33,48 @@ pub struct AppState {
     pub totp_key: zeroize::Zeroizing<[u8; 32]>,
     /// 未知ユーザーの login_verify で timing を平準化する固定ダミー PHC。
     pub dummy_phc: String,
+    /// WebAuthn (passkey 第2要素)。セッションを gate するだけで E2EE 鍵ツリーとは無関係。
+    pub webauthn: Arc<Webauthn>,
+}
+
+/// RP ID + origin から `Webauthn` を構築する。非 localhost の http origin 等の不正設定では
+/// webauthn-rs がエラーを返す (= 起動失敗で fail-closed、CSP 導出と同方針)。
+fn build_webauthn(rp_id: &str, origin: &str) -> anyhow::Result<Webauthn> {
+    let url = Url::parse(origin)
+        .map_err(|e| anyhow::anyhow!("WEBAUTHN_ORIGIN ({origin}) が不正な URL です: {e}"))?;
+    let builder = WebauthnBuilder::new(rp_id, &url).map_err(|e| {
+        anyhow::anyhow!("WebAuthn 構築に失敗 (rp_id={rp_id}, origin={origin}): {e}")
+    })?;
+    Ok(builder.rp_name("いいかんじ家計簿").build()?)
 }
 
 impl AppState {
+    /// 既定 (localhost) の WebAuthn でアプリ状態を作る。テストはこちらを使う。
     pub fn new(pool: PgPool, server_secret: Vec<u8>) -> Self {
+        Self::new_with_webauthn(pool, server_secret, "localhost", "http://localhost:8080")
+            .expect("default localhost webauthn always builds")
+    }
+
+    /// RP ID + origin を指定してアプリ状態を作る (本番は config 値を渡す)。
+    pub fn new_with_webauthn(
+        pool: PgPool,
+        server_secret: Vec<u8>,
+        rp_id: &str,
+        origin: &str,
+    ) -> anyhow::Result<Self> {
         let dummy = AuthKey::from_wire_bytes([0u8; 32]);
         let dummy_phc =
             hash_auth_key(&dummy, KdfParams::SERVER_V1).expect("dummy hash never fails");
         let totp_key =
             zeroize::Zeroizing::new(derive_server_key(&server_secret, b"totp-at-rest-v1"));
-        Self {
+        let webauthn = Arc::new(build_webauthn(rp_id, origin)?);
+        Ok(Self {
             pool,
             server_secret,
             totp_key,
             dummy_phc,
-        }
+            webauthn,
+        })
     }
 }
 
@@ -57,6 +87,18 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login/begin", post(auth::login_begin))
         .route("/auth/login/verify", post(auth::login_verify))
         .route("/auth/2fa/totp", post(auth::totp_2fa))
+        // passkey 第2要素。register 系は AuthUser gate (TOTP 通過済みセッション)。
+        // auth 系は login_token (= パスワード検証済み) を要し、TOTP の代替として 2FA を通す。
+        .route(
+            "/auth/passkey/register/begin",
+            post(auth::passkey_register_begin),
+        )
+        .route(
+            "/auth/passkey/register/finish",
+            post(auth::passkey_register_finish),
+        )
+        .route("/auth/passkey/auth/begin", post(auth::passkey_auth_begin))
+        .route("/auth/passkey/auth/finish", post(auth::passkey_auth_finish))
         .route("/sync/push", post(sync::push))
         .route("/sync/pull", get(sync::pull))
         .route("/sync/cursor", get(sync::cursor))

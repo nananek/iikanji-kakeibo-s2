@@ -48,7 +48,14 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     let pool = connect(&config.database_url).await?;
     migrate(&pool).await?;
-    let state = AppState::new(pool, config.server_secret);
+    // WebAuthn の RP ID / origin は config (env) から。非 localhost の http 等の不正設定は
+    // ここで起動失敗にする (fail-closed)。
+    let state = AppState::new_with_webauthn(
+        pool,
+        config.server_secret,
+        &config.webauthn_rp_id,
+        &config.webauthn_origin,
+    )?;
 
     // API ルーター。STATIC_DIR があれば SPA(dist) を同一オリジンで配信する
     // (API ルートに当たらないパスは static、未知パスは index.html へ SPA fallback)。

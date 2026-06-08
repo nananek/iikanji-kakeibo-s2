@@ -19,6 +19,7 @@ use zeroize::Zeroize;
 use crate::api::Client;
 use crate::crypto_glue::{build_signup_from_pmk, login_keys_from_pmk, unlock_data_key, LoginKeys};
 use crate::records::{open_record, seal_record};
+use crate::webauthn_glue::{authenticate_passkey, register_passkey};
 use crate::worker::{argon_hash_in_worker, ArgonInput};
 use iikanji_crypto::{generate_salt, pmk_from_hash, DataKey};
 use iikanji_domain::{
@@ -26,7 +27,8 @@ use iikanji_domain::{
     RecordPayload, Yen,
 };
 use iikanji_types::auth::{
-    LoginBeginRequest, LoginVerifyRequest, TotpConfirmRequest, TotpVerifyRequest,
+    Factor, LoginBeginRequest, LoginVerifyRequest, SessionResponse, TotpConfirmRequest,
+    TotpVerifyRequest,
 };
 use iikanji_types::sync::{EncRecord, PushChange, PushRequest};
 use uuid::Uuid;
@@ -238,6 +240,48 @@ pub struct Session {
     pub(crate) cursor: u64,
 }
 
+/// StoredValue から非 Clone な `LoginKeys` (wrapKey 保持) を取り出す。
+fn take_keys(store: StoredValue<Option<LoginKeys>>) -> Option<LoginKeys> {
+    let mut taken = None;
+    store.update_value(|slot| taken = slot.take());
+    taken
+}
+
+/// 2FA (TOTP / passkey いずれか) 通過後の共通処理。受領した `SessionResponse` の MK/DK ラップ blob を
+/// **login 第1段 (パスワード) 由来の wrapKey** でアンロックして DK を復元し、セッショントークンで
+/// 疎通確認 (cursor) してアプリ `Session` を確立する。passkey は鍵ツリーに一切触れない (invariant 3)。
+async fn finalize_login(
+    session_resp: SessionResponse,
+    keys: LoginKeys,
+    mut client: Client,
+    email: String,
+    session: StoredValue<Option<Session>>,
+    logged_in: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+) {
+    let dk = match unlock_data_key(&keys, &session_resp.mk_pw, &session_resp.dk_wrap) {
+        Ok(dk) => dk,
+        Err(e) => {
+            error.set(Some(format!("復号鍵のアンロックに失敗しました: {e}")));
+            return;
+        }
+    };
+    drop(keys); // wrapKey を即破棄 (生存窓を最小化)。
+    client.set_session_token(session_resp.session_token);
+    match client.cursor().await {
+        Ok(c) => {
+            session.set_value(Some(Session {
+                dk,
+                client,
+                email,
+                cursor: c.cursor,
+            }));
+            logged_in.set(true);
+        }
+        Err(e) => error.set(Some(format!("セッション確認に失敗しました: {e}"))),
+    }
+}
+
 /// login フォーム + TOTP 2FA + DK アンロック。成功で `session` を確立し `logged_in` を立てる。
 #[component]
 pub fn LoginForm(
@@ -251,6 +295,8 @@ pub fn LoginForm(
     let login_token = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(Option::<String>::None);
+    // login_verify が返す factors に passkey が含まれるか (Totp 段で「パスキーで認証」を出すか)。
+    let has_passkey = RwSignal::new(false);
     // 非 Clone な LoginKeys (wrapKey 保持) を段階間で持ち越す。StoredValue ハンドルは Send+Copy
     // なので reactive クロージャ (Send 必須) に取り込める。LoginKeys は Send+Sync。
     let keys_store = StoredValue::new(None::<LoginKeys>);
@@ -307,6 +353,7 @@ pub fn LoginForm(
                 .await
             {
                 Ok(resp) => {
+                    has_passkey.set(resp.factors.contains(&Factor::Passkey));
                     login_token.set(resp.login_token);
                     keys_store.set_value(Some(keys));
                     step.set(LoginStep::Totp);
@@ -317,7 +364,7 @@ pub fn LoginForm(
         });
     };
 
-    // 段階2: totp_2fa → SessionResponse → wrapKey で DK をアンロック → 認証付き API で疎通確認。
+    // 段階2a: totp_2fa → SessionResponse → finalize_login (wrapKey で DK アンロック → Session 確立)。
     let on_totp = move |ev: SubmitEvent| {
         ev.prevent_default();
         if busy.get() {
@@ -329,7 +376,7 @@ pub fn LoginForm(
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            let mut client = Client::new("");
+            let client = Client::new("");
             // 2FA 通過で初めて MK/DK ラップ blob (SessionResponse) を受領。
             let session_resp = match client
                 .totp_2fa(&TotpVerifyRequest {
@@ -345,10 +392,7 @@ pub fn LoginForm(
                     return;
                 }
             };
-            // 持ち越した LoginKeys を取り出す。
-            let mut taken = None;
-            keys_store.update_value(|slot| taken = slot.take());
-            let keys = match taken {
+            let keys = match take_keys(keys_store) {
                 Some(k) => k,
                 None => {
                     error.set(Some("内部エラー: 鍵が見つかりません".into()));
@@ -356,30 +400,40 @@ pub fn LoginForm(
                     return;
                 }
             };
-            // wrapKey → MK → DK を復元 (E2EE unlock)。DK はアプリ Session として保持する。
-            let dk = match unlock_data_key(&keys, &session_resp.mk_pw, &session_resp.dk_wrap) {
-                Ok(dk) => dk,
+            finalize_login(session_resp, keys, client, em, session, logged_in, error).await;
+            busy.set(false);
+        });
+    };
+
+    // 段階2b (代替): passkey で 2FA。TOTP コードの代わりに認証器で assertion → 同じく SessionResponse。
+    // wrapKey は段階1 (パスワード) 由来のまま使う — passkey は鍵ツリーに触れない (invariant 3)。
+    let on_passkey = move |_| {
+        if busy.get() {
+            return;
+        }
+        let token = login_token.get();
+        let em = email.get();
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let client = Client::new("");
+            let session_resp = match authenticate_passkey(&client, &token).await {
+                Ok(s) => s,
                 Err(e) => {
-                    error.set(Some(format!("復号鍵のアンロックに失敗しました: {e}")));
+                    error.set(Some(format!("パスキー認証に失敗しました: {e}")));
                     busy.set(false);
                     return;
                 }
             };
-            drop(keys); // wrapKey を即破棄 (cursor 往復より前に生存窓を最小化)。
-                        // セッショントークンで認証付き API (cursor) を実行し、疎通確認 + 初期カーソル取得。
-            client.set_session_token(session_resp.session_token);
-            match client.cursor().await {
-                Ok(c) => {
-                    session.set_value(Some(Session {
-                        dk,
-                        client,
-                        email: em,
-                        cursor: c.cursor,
-                    }));
-                    logged_in.set(true);
+            let keys = match take_keys(keys_store) {
+                Some(k) => k,
+                None => {
+                    error.set(Some("内部エラー: 鍵が見つかりません".into()));
+                    busy.set(false);
+                    return;
                 }
-                Err(e) => error.set(Some(format!("セッション確認に失敗しました: {e}"))),
-            }
+            };
+            finalize_login(session_resp, keys, client, em, session, logged_in, error).await;
             busy.set(false);
         });
     };
@@ -395,7 +449,7 @@ pub fn LoginForm(
             {move || match step.get() {
                 LoginStep::Form => {
                     view! {
-                        <form on:submit=on_login.clone()>
+                        <form on:submit=on_login>
                             <label>
                                 "メール"
                                 <input
@@ -423,7 +477,7 @@ pub fn LoginForm(
                 }
                 LoginStep::Totp => {
                     view! {
-                        <form on:submit=on_totp.clone()>
+                        <form on:submit=on_totp>
                             <label>
                                 "TOTP コード"
                                 <input
@@ -439,6 +493,22 @@ pub fn LoginForm(
                                 "確認"
                             </button>
                         </form>
+                        {move || {
+                            has_passkey
+                                .get()
+                                .then(|| {
+                                    view! {
+                                        <button
+                                            type="button"
+                                            data-testid="passkey-auth"
+                                            on:click=on_passkey
+                                            prop:disabled=move || busy.get()
+                                        >
+                                            "パスキーで認証"
+                                        </button>
+                                    }
+                                })
+                        }}
                     }
                         .into_any()
                 }
@@ -474,7 +544,86 @@ pub fn LedgerShell(
                     "ログアウト"
                 </button>
             </header>
+            <PasskeyRegister session=session />
             <LedgerView session=session />
+        </section>
+    }
+}
+
+/// passkey 登録 UI。ログイン済み (= TOTP gate 済み) セッションで認証器を登録する。
+/// 登録した passkey は次回以降のログインで TOTP の代替として使える (TOTP 自体は引き続き必須)。
+#[component]
+fn PasskeyRegister(session: StoredValue<Option<Session>>) -> impl IntoView {
+    let nickname = RwSignal::new(String::new());
+    // 結果メッセージ: Ok=成功 / Err=失敗。
+    let status = RwSignal::new(Option::<Result<String, String>>::None);
+    let busy = RwSignal::new(false);
+
+    let on_register = move |_| {
+        if busy.get() {
+            return;
+        }
+        // セッションの API クライアント (セッショントークン保持) をクローンして使う。
+        let Some(client) = session.with_value(|s| s.as_ref().map(|s| s.client.clone())) else {
+            return;
+        };
+        let nn = nickname.get();
+        let nn = (!nn.trim().is_empty()).then(|| nn.trim().to_string());
+        busy.set(true);
+        status.set(None);
+        spawn_local(async move {
+            match register_passkey(&client, nn).await {
+                Ok(()) => status.set(Some(Ok("パスキーを登録しました".into()))),
+                Err(e) => status.set(Some(Err(format!("パスキー登録に失敗しました: {e}")))),
+            }
+            busy.set(false);
+        });
+    };
+
+    view! {
+        <section class="passkey" data-testid="passkey-settings">
+            <h3>"パスキー"</h3>
+            <p class="muted">
+                "2回目以降のログインで TOTP の代わりにパスキーを使えます (TOTP も引き続き必要です)。"
+            </p>
+            <label>
+                "名前 (任意)"
+                <input
+                    data-testid="passkey-nickname"
+                    type="text"
+                    prop:value=move || nickname.get()
+                    on:input=move |ev| nickname.set(event_target_value(&ev))
+                />
+            </label>
+            <button
+                data-testid="passkey-register"
+                on:click=on_register
+                prop:disabled=move || busy.get()
+            >
+                {move || if busy.get() { "登録中…" } else { "パスキーを登録" }}
+            </button>
+            {move || {
+                status
+                    .get()
+                    .map(|r| match r {
+                        Ok(m) => {
+                            view! {
+                                <p class="ok" data-testid="passkey-status" role="status">
+                                    {m}
+                                </p>
+                            }
+                                .into_any()
+                        }
+                        Err(m) => {
+                            view! {
+                                <p class="error" data-testid="passkey-status" role="alert">
+                                    {m}
+                                </p>
+                            }
+                                .into_any()
+                        }
+                    })
+            }}
         </section>
     }
 }

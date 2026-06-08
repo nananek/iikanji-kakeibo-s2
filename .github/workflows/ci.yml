@@ -141,7 +141,8 @@ jobs:
         # playwright.config.ts の webServer が Rust サーバー + 静的/プロキシサーバーを起動する。
         run: |
           npm ci --include=dev
-          npx playwright install --with-deps firefox
+          # firefox: 既存スペック / chromium: passkey の CDP 仮想認証器 e2e。
+          npx playwright install --with-deps firefox chromium
           npx playwright test
       - name: Upload Playwright report
         if: ${{ !cancelled() && steps.detect.outputs.have_specs == 'true' }}

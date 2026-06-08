@@ -12,6 +12,12 @@ pub struct Config {
     /// 静的 SPA(Trunk dist) の配信元ディレクトリ。設定時のみ server が同一オリジンで配信する。
     /// 未設定なら API 専用 (テスト・別配信構成)。
     pub static_dir: Option<String>,
+    /// WebAuthn の Relying Party ID (= effective domain)。passkey の scope を縛る。
+    /// 本番は配信ドメイン (例 "kakeibo.example.com")。既定はローカル開発用 "localhost"。
+    pub webauthn_rp_id: String,
+    /// WebAuthn の origin (scheme + host + port)。RP ID は origin の登録可能サフィックスである必要がある。
+    /// localhost / 127.0.0.1 以外は https 必須 (webauthn-rs が検証 → 不正なら起動失敗で fail-closed)。
+    pub webauthn_origin: String,
 }
 
 impl Config {
@@ -29,11 +35,17 @@ impl Config {
             );
         }
         let static_dir = std::env::var("STATIC_DIR").ok().filter(|s| !s.is_empty());
+        let webauthn_rp_id =
+            std::env::var("WEBAUTHN_RP_ID").unwrap_or_else(|_| "localhost".to_string());
+        let webauthn_origin = std::env::var("WEBAUTHN_ORIGIN")
+            .unwrap_or_else(|_| "http://localhost:8080".to_string());
         Ok(Config {
             database_url,
             bind_addr,
             server_secret,
             static_dir,
+            webauthn_rp_id,
+            webauthn_origin,
         })
     }
 }
