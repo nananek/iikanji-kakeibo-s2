@@ -113,13 +113,19 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         if: steps.detect.outputs.have_specs == 'true'
-      - name: Install Trunk
+      - name: Install Trunk + wasm tooling
         if: steps.detect.outputs.have_specs == 'true'
         uses: taiki-e/install-action@v2
         with:
-          tool: trunk
-      - name: Build SPA (trunk --release)
+          # trunk 内蔵ダウンローダは release-CDN(github) の 504 で flaky に失敗するため、
+          # wasm-bindgen-cli / wasm-opt を堅牢な installer で事前に PATH へ入れ、TRUNK_OFFLINE で使う。
+          # wasm-bindgen-cli の版は wasm-bindgen crate (Cargo.lock) と一致必須 — bump 時はここも更新。
+          tool: trunk,wasm-bindgen-cli@0.2.122,wasm-opt
+      - name: Build SPA (trunk --release, offline tools)
         if: steps.detect.outputs.have_specs == 'true'
+        env:
+          # PATH の wasm-bindgen / wasm-opt を使い、trunk のツール DL (flaky CDN) を回避。
+          TRUNK_OFFLINE: "true"
         run: trunk build --release
       - name: Build API server
         if: steps.detect.outputs.have_specs == 'true'
