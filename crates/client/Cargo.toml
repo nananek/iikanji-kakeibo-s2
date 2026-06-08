@@ -1,0 +1,13 @@
+[package]
+name = "iikanji-client"
+version = "0.1.0"
+description = "Leptos SPA のクライアントロジック (WASM)。鍵管理・同期・UI。財務計算は domain 共有。"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+iikanji-crypto = { path = "../crypto" }
+iikanji-types = { path = "../types" }
+zeroize = { workspace = true }

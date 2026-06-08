@@ -824,6 +824,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "iikanji-client"
+version = "0.1.0"
+dependencies = [
+ "iikanji-crypto",
+ "iikanji-types",
+ "zeroize",
+]
+
+[[package]]
 name = "iikanji-crypto"
 version = "0.1.0"
 dependencies = [

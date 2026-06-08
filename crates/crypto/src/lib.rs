@@ -28,7 +28,7 @@ mod tests;
 
 pub use auth::{hash_auth_key, verify_auth_key};
 pub use error::{CryptoError, Result};
-pub use kdf::{derive_pmk, KdfParams, SALT_LEN};
+pub use kdf::{derive_pmk, generate_salt, KdfParams, SALT_LEN};
 pub use keys::{AuthKey, DataKey, MasterKey, Pmk, RecoveryKey, WrapKey};
 pub use record::{decrypt_record, encrypt_record};
 pub use recovery::RecoveryCode;
