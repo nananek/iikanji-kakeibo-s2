@@ -54,6 +54,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/totp/confirm", post(auth::totp_confirm))
         .route("/auth/login/begin", post(auth::login_begin))
         .route("/auth/login/verify", post(auth::login_verify))
+        .route("/auth/2fa/totp", post(auth::totp_2fa))
         .with_state(state)
 }
 

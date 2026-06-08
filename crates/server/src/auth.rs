@@ -6,14 +6,14 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use iikanji_crypto::{
     gen_opaque_token, hash_auth_key, hash_token, open_at_rest, seal_at_rest, server_dummy_salt,
     verify_auth_key, AuthKey, KdfParams, TotpSecret,
 };
 use iikanji_types::{
     Factor, LoginBeginRequest, LoginBeginResponse, LoginVerifyRequest, LoginVerifyResponse,
-    SignupRequest, SignupResponse, TotpConfirmRequest,
+    SessionResponse, SignupRequest, SignupResponse, TotpConfirmRequest, TotpVerifyRequest,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -24,6 +24,10 @@ use crate::AppState;
 const TOTP_ISSUER: &str = "いいかんじ家計簿";
 /// TOTP confirm の失敗許容回数。超えるとアカウント単位でロック (ブルートフォース緩和)。
 const MAX_TOTP_CONFIRM_ATTEMPTS: i32 = 10;
+/// 2FA (login_token) の失敗許容回数。超えるとトークンを破棄し再 login を要求する。
+const MAX_2FA_ATTEMPTS: i32 = 5;
+/// セッションの有効期間 (日)。
+const SESSION_DAYS: i64 = 30;
 
 /// `users.status` の値 (typo 防止のため定数化)。
 mod status {
@@ -246,5 +250,119 @@ pub async fn login_verify(
     Ok(Json(LoginVerifyResponse {
         login_token: token,
         factors: vec![Factor::Totp],
+    }))
+}
+
+/// 2FA (TOTP)。login_token を消費し、TOTP コードを検証して**セッションと MK/DK ラップ blob を返す**。
+/// blob はここで初めて返す (2FA 通過後)。login_token はワンショット相当 (失敗を上限まで許容)。
+pub async fn totp_2fa(
+    State(st): State<AppState>,
+    Json(req): Json<TotpVerifyRequest>,
+) -> Result<Json<SessionResponse>, AppError> {
+    let token_hash = hash_token(req.login_token.as_bytes()).to_vec();
+
+    let mut tx = st.pool.begin().await?;
+    let pending = sqlx::query(
+        "SELECT user_id, expires_at, failed_attempts FROM pending_logins \
+         WHERE token_hash = $1 FOR UPDATE",
+    )
+    .bind(&token_hash)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(AppError::Unauthorized)?;
+
+    let user_id: Uuid = pending.get("user_id");
+    let expires_at: DateTime<Utc> = pending.get("expires_at");
+    let attempts: i32 = pending.get("failed_attempts");
+
+    // 期限切れ / 試行超過 → トークンを破棄して拒否。
+    if expires_at < Utc::now() || attempts >= MAX_2FA_ATTEMPTS {
+        sqlx::query("DELETE FROM pending_logins WHERE token_hash = $1")
+            .bind(&token_hash)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Err(AppError::Unauthorized);
+    }
+
+    let trow = sqlx::query(
+        "SELECT secret_enc, last_used_step FROM totp_secrets WHERE user_id = $1 FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(AppError::Unauthorized)?;
+    let secret_enc: Vec<u8> = trow.get("secret_enc");
+    let last_used_step: Option<i64> = trow.get("last_used_step");
+
+    let secret = TotpSecret::from_bytes(open_at_rest(
+        &st.totp_key,
+        &totp_context(user_id),
+        &secret_enc,
+    )?);
+
+    let step = match secret.verify(&req.code, now_unix(), last_used_step.map(|s| s as u64))? {
+        Some(step) => step,
+        None => {
+            sqlx::query(
+                "UPDATE pending_logins SET failed_attempts = failed_attempts + 1 \
+                 WHERE token_hash = $1",
+            )
+            .bind(&token_hash)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Err(AppError::Unauthorized);
+        }
+    };
+
+    // 成功: replay step を前進、login_token を消費、セッション発行。
+    sqlx::query("UPDATE totp_secrets SET last_used_step = $2 WHERE user_id = $1")
+        .bind(user_id)
+        .bind(step as i64)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM pending_logins WHERE token_hash = $1")
+        .bind(&token_hash)
+        .execute(&mut *tx)
+        .await?;
+
+    let session_token = gen_opaque_token();
+    sqlx::query("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)")
+        .bind(hash_token(session_token.as_bytes()).to_vec())
+        .bind(user_id)
+        .bind(Utc::now() + Duration::days(SESSION_DAYS))
+        .execute(&mut *tx)
+        .await?;
+
+    // 2FA 通過後にのみ MK/DK ラップ blob を渡す。
+    let mk_pw: Vec<u8> =
+        sqlx::query_scalar("SELECT blob FROM key_blobs WHERE user_id = $1 AND purpose = $2")
+            .bind(user_id)
+            .bind("mk-pw")
+            .fetch_one(&mut *tx)
+            .await?;
+    let dk_wrap: Vec<u8> =
+        sqlx::query_scalar("SELECT blob FROM key_blobs WHERE user_id = $1 AND purpose = $2")
+            .bind(user_id)
+            .bind("dk-wrap")
+            .fetch_one(&mut *tx)
+            .await?;
+    // sync_cursor の正統な源泉は user_seq.next_seq (per-user 単調カウンタ)。
+    // レコード 0 件なら next_seq=1 → cursor=0。MAX(enc_records.seq) は seq の抜けで
+    // ずれ得るうえ全スキャンになるため使わない。
+    let sync_cursor: i64 =
+        sqlx::query_scalar("SELECT next_seq - 1 FROM user_seq WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+    tx.commit().await?;
+
+    Ok(Json(SessionResponse {
+        session_token,
+        mk_pw,
+        dk_wrap,
+        sync_cursor: sync_cursor as u64,
     }))
 }
