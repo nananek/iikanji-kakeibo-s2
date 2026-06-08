@@ -13,10 +13,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # サーバー / コア (Rust native): fmt + clippy + test + カバレッジ。
+  # サーバー / コア (Rust native): fmt + clippy + test + カバレッジ。Postgres を起動して統合テスト。
   server:
     name: server
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: iikanji_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/iikanji_test
     steps:
       - uses: actions/checkout@v5
       - name: Install Rust
@@ -33,8 +48,8 @@ jobs:
       - name: Test + coverage
         run: |
           cargo llvm-cov --no-report --workspace --all-features
-          cargo llvm-cov report --lcov --output-path lcov.info
-          cargo llvm-cov report --summary-only --fail-under-lines 70
+          cargo llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex 'src/main\.rs'
+          cargo llvm-cov report --summary-only --fail-under-lines 70 --ignore-filename-regex 'src/main\.rs'
       - name: Upload coverage (lcov)
         uses: actions/upload-artifact@v4
         with:

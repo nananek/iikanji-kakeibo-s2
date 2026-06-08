@@ -228,3 +228,33 @@ fn keys_debug_is_redacted() {
     assert!(s.contains("redacted"));
     assert!(!s.contains('['));
 }
+
+#[test]
+fn server_helpers_token_hash_and_dummy_salt() {
+    // 不透明トークン: 64 hex 文字、ランダム (2 回で異なる)。
+    let t1 = gen_opaque_token();
+    let t2 = gen_opaque_token();
+    assert_eq!(t1.len(), 64);
+    assert!(t1.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_ne!(t1, t2);
+
+    // hash_token: 決定的 32B。
+    assert_eq!(hash_token(b"abc"), hash_token(b"abc"));
+    assert_ne!(hash_token(b"abc"), hash_token(b"abd"));
+
+    // dummy salt: 16B・決定的・email/secret で変わる。
+    let secret = b"secret";
+    assert_eq!(server_dummy_salt(secret, "a@x").len(), 16);
+    assert_eq!(
+        server_dummy_salt(secret, "a@x"),
+        server_dummy_salt(secret, "a@x")
+    );
+    assert_ne!(
+        server_dummy_salt(secret, "a@x"),
+        server_dummy_salt(secret, "b@x")
+    );
+    assert_ne!(
+        server_dummy_salt(secret, "a@x"),
+        server_dummy_salt(b"other", "a@x")
+    );
+}

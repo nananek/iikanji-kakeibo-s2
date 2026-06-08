@@ -1,0 +1,36 @@
+[package]
+name = "iikanji-server"
+version = "0.1.0"
+description = "認証付き暗号 blob ストア (Axum + Postgres)。レコードは決して復号しない。"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "iikanji_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "iikanji-server"
+path = "src/main.rs"
+
+[dependencies]
+iikanji-crypto = { path = "../crypto" }
+iikanji-types = { path = "../types" }
+axum = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+http-body-util = { workspace = true }
+base64 = { workspace = true }

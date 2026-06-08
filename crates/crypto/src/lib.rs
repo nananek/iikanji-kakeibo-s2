@@ -19,6 +19,7 @@ mod kdf;
 mod keys;
 mod record;
 mod recovery;
+mod server;
 mod wrap;
 
 #[cfg(test)]
@@ -30,6 +31,7 @@ pub use kdf::{derive_pmk, KdfParams, SALT_LEN};
 pub use keys::{AuthKey, DataKey, MasterKey, Pmk, RecoveryKey, WrapKey};
 pub use record::{decrypt_record, encrypt_record};
 pub use recovery::RecoveryCode;
+pub use server::{gen_opaque_token, hash_token, server_dummy_salt};
 pub use wrap::{
     unwrap_data_key, unwrap_master_key_with_password, unwrap_master_key_with_recovery,
     wrap_data_key, wrap_master_key_with_password, wrap_master_key_with_recovery,
