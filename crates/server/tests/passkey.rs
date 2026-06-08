@@ -198,6 +198,7 @@ async fn expire_login_token(pool: &PgPool, login_token: &str) {
 }
 
 /// login_token の 2FA 失敗回数を上限超過まで引き上げる。
+/// 100 は MAX_2FA_ATTEMPTS (現在 5) を確実に超える値 (定数は server 内部 private のため直書き)。
 async fn exhaust_login_attempts(pool: &PgPool, login_token: &str) {
     sqlx::query("UPDATE pending_logins SET failed_attempts = 100 WHERE token_hash = $1")
         .bind(hash_token(login_token.as_bytes()).to_vec())
@@ -284,5 +285,7 @@ async fn auth_finish_rejects_after_max_2fa_attempts_without_session() {
     )
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+    // invariant 4: 期限切れ側と対称に、blob (session/MK) を返さないことを確認する。
     assert!(body.get("session_token").is_none());
+    assert!(body.get("mk_pw").is_none());
 }
