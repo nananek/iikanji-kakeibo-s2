@@ -22,3 +22,5 @@ serde_json = { workspace = true }
 leptos = { workspace = true }
 console_error_panic_hook = { workspace = true }
 gloo-net = { version = "0.6", default-features = false, features = ["http"] }
+# Uuid::new_v4() の乱数源 (wasm32 では js バックエンドが必要)。
+uuid = { workspace = true, features = ["js"] }
