@@ -72,6 +72,11 @@ pub fn derive_pmk(password: &[u8], salt: &[u8], params: KdfParams) -> Result<Pmk
     Ok(Pmk::from_bytes(argon2_raw(password, salt, params)?))
 }
 
+/// 新しい password salt (16B) を OS CSPRNG から生成する (signup 時にクライアントが使う)。
+pub fn generate_salt() -> [u8; SALT_LEN] {
+    crate::random_array()
+}
+
 pub(crate) fn argon2_raw(password: &[u8], salt: &[u8], params: KdfParams) -> Result<[u8; 32]> {
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params.to_argon2()?);
     let mut out = [0u8; 32];
