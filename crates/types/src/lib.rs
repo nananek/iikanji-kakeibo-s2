@@ -16,7 +16,8 @@ mod tests;
 
 pub use auth::{
     Factor, KeyBlobs, LoginBeginRequest, LoginBeginResponse, LoginVerifyRequest,
-    LoginVerifyResponse, SessionResponse, SignupRequest, TotpVerifyRequest,
+    LoginVerifyResponse, SessionResponse, SignupRequest, SignupResponse, TotpConfirmRequest,
+    TotpVerifyRequest,
 };
 pub use sync::{
     EncRecord, PullResponse, PushChange, PushRequest, PushResponse, PushResult, PushStatus,

@@ -1,19 +1,19 @@
-//! 認証ハンドラ (Bitwarden 方式)。signup と login(begin/verify)。
+//! 認証ハンドラ (Bitwarden 方式 + TOTP)。signup → totp/confirm → login(begin/verify)。
 //!
-//! 不変条件: サーバーはパスワードを学習しない (受け取るのは authKey のみ)。ラップ blob は
-//! signup 時に保存し、2FA 通過後にのみ返す (本 PR では login_verify までで、blob 返却は後続)。
+//! 不変条件: サーバーはパスワードを学習しない (受け取るのは authKey のみ)。TOTP 秘密は
+//! at-rest 暗号して保持し、復号鍵としては使わない。ラップ blob は 2FA 通過後に返す (後続 PR)。
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{Duration, Utc};
 use iikanji_crypto::{
-    gen_opaque_token, hash_auth_key, hash_token, server_dummy_salt, verify_auth_key, AuthKey,
-    KdfParams,
+    gen_opaque_token, hash_auth_key, hash_token, open_at_rest, seal_at_rest, server_dummy_salt,
+    verify_auth_key, AuthKey, KdfParams, TotpSecret,
 };
 use iikanji_types::{
     Factor, LoginBeginRequest, LoginBeginResponse, LoginVerifyRequest, LoginVerifyResponse,
-    SignupRequest,
+    SignupRequest, SignupResponse, TotpConfirmRequest,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -21,11 +21,24 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::AppState;
 
+const TOTP_ISSUER: &str = "いいかんじ家計簿";
+
 fn auth_key_from(bytes: &[u8]) -> Result<AuthKey, AppError> {
     let arr: [u8; 32] = bytes
         .try_into()
         .map_err(|_| AppError::BadRequest("auth_key must be 32 bytes"))?;
     Ok(AuthKey::from_wire_bytes(arr))
+}
+
+/// TOTP 秘密 at-rest 暗号の AAD コンテキスト (user_id で束縛)。
+fn totp_context(user_id: Uuid) -> Vec<u8> {
+    let mut c = b"iikanji/totp-at-rest/v1/".to_vec();
+    c.extend_from_slice(user_id.as_bytes());
+    c
+}
+
+fn now_unix() -> u64 {
+    Utc::now().timestamp().max(0) as u64
 }
 
 pub async fn health() -> &'static str {
@@ -35,7 +48,7 @@ pub async fn health() -> &'static str {
 pub async fn signup(
     State(st): State<AppState>,
     Json(req): Json<SignupRequest>,
-) -> Result<StatusCode, AppError> {
+) -> Result<(StatusCode, Json<SignupResponse>), AppError> {
     if req.email.trim().is_empty() {
         return Err(AppError::BadRequest("email required"));
     }
@@ -44,8 +57,8 @@ pub async fn signup(
 
     let mut tx = st.pool.begin().await?;
     let inserted = sqlx::query(
-        "INSERT INTO users (email, salt_pw, kdf_version, auth_hash) \
-         VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO users (email, status, salt_pw, kdf_version, auth_hash) \
+         VALUES ($1, 'pending_totp', $2, $3, $4) RETURNING id",
     )
     .bind(&req.email)
     .bind(&req.salt_pw)
@@ -78,8 +91,64 @@ pub async fn signup(
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
+
+    // TOTP は必須。秘密を生成し at-rest 暗号して保存 (enabled=false → confirm で有効化)。
+    let secret = TotpSecret::generate();
+    let secret_enc = seal_at_rest(&st.totp_key, &totp_context(user_id), secret.as_bytes());
+    sqlx::query("INSERT INTO totp_secrets (user_id, secret_enc, enabled) VALUES ($1, $2, false)")
+        .bind(user_id)
+        .bind(secret_enc)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
-    Ok(StatusCode::CREATED)
+
+    let totp_provisioning_uri = secret.provisioning_uri(TOTP_ISSUER, &req.email)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(SignupResponse {
+            totp_provisioning_uri,
+        }),
+    ))
+}
+
+pub async fn totp_confirm(
+    State(st): State<AppState>,
+    Json(req): Json<TotpConfirmRequest>,
+) -> Result<StatusCode, AppError> {
+    let row = sqlx::query(
+        "SELECT u.id, u.status, t.secret_enc, t.last_used_step \
+         FROM users u JOIN totp_secrets t ON t.user_id = u.id WHERE u.email = $1",
+    )
+    .bind(&req.email)
+    .fetch_optional(&st.pool)
+    .await?
+    .ok_or(AppError::Unauthorized)?;
+
+    let user_id: Uuid = row.get("id");
+    if row.get::<String, _>("status") == "active" {
+        return Err(AppError::Conflict("totp already confirmed"));
+    }
+    let secret_enc: Vec<u8> = row.get("secret_enc");
+    let last_used_step: Option<i64> = row.get("last_used_step");
+
+    let secret_bytes = open_at_rest(&st.totp_key, &totp_context(user_id), &secret_enc)?;
+    let secret = TotpSecret::from_bytes(secret_bytes);
+    let step = secret
+        .verify(&req.code, now_unix(), last_used_step.map(|s| s as u64))?
+        .ok_or(AppError::Unauthorized)?;
+
+    let mut tx = st.pool.begin().await?;
+    sqlx::query("UPDATE totp_secrets SET enabled = true, last_used_step = $2 WHERE user_id = $1")
+        .bind(user_id)
+        .bind(step as i64)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE users SET status = 'active', updated_at = now() WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(StatusCode::OK)
 }
 
 pub async fn login_begin(
@@ -108,7 +177,7 @@ pub async fn login_verify(
     Json(req): Json<LoginVerifyRequest>,
 ) -> Result<Json<LoginVerifyResponse>, AppError> {
     let auth_key = auth_key_from(&req.auth_key)?;
-    let row = sqlx::query("SELECT id, auth_hash FROM users WHERE email = $1")
+    let row = sqlx::query("SELECT id, status, auth_hash FROM users WHERE email = $1")
         .bind(&req.email)
         .fetch_optional(&st.pool)
         .await?;
@@ -116,10 +185,13 @@ pub async fn login_verify(
     let user_id = match row {
         Some(r) => {
             let hash: String = r.get("auth_hash");
-            if verify_auth_key(&auth_key, &hash).unwrap_or(false) {
-                Some(r.get::<Uuid, _>("id"))
-            } else {
+            if !verify_auth_key(&auth_key, &hash).unwrap_or(false) {
                 None
+            } else if r.get::<String, _>("status") != "active" {
+                // パスワードは正しいが TOTP 未確定 (= アカウント所有者)。
+                return Err(AppError::Forbidden("complete TOTP setup before login"));
+            } else {
+                Some(r.get::<Uuid, _>("id"))
             }
         }
         None => {
@@ -128,7 +200,6 @@ pub async fn login_verify(
             None
         }
     };
-
     let user_id = user_id.ok_or(AppError::Unauthorized)?;
 
     // 2FA-pending トークンを発行 (OsRng 由来・ハッシュのみ保存)。blob は 2FA 通過後 (後続 PR)。

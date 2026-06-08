@@ -18,6 +18,9 @@ pub enum CryptoError {
     /// サーバー側 auth ハッシュの生成・検証エラー。
     #[error("auth hash error: {0}")]
     Auth(&'static str),
+    /// TOTP の生成・検証エラー。
+    #[error("totp error: {0}")]
+    Totp(&'static str),
 }
 
 pub type Result<T> = core::result::Result<T, CryptoError>;

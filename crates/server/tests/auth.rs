@@ -6,10 +6,12 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use chrono::Utc;
 use http_body_util::BodyExt;
+use iikanji_crypto::TotpSecret;
 use iikanji_server::{migrate, router, AppState};
-use iikanji_types::{KeyBlobs, LoginBeginRequest, LoginVerifyRequest, SignupRequest};
-use serde_json::Value;
+use iikanji_types::{KeyBlobs, LoginVerifyRequest, SignupRequest};
+use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -62,61 +64,104 @@ fn signup_body(email: &str, auth_key: Vec<u8>) -> Value {
     .unwrap()
 }
 
+fn verify_body(email: &str, auth_key: Vec<u8>) -> Value {
+    serde_json::to_value(LoginVerifyRequest {
+        email: email.to_string(),
+        auth_key,
+    })
+    .unwrap()
+}
+
+/// プロビジョニング URI から現在時刻の TOTP コードを作る (authenticator アプリの代用)。
+fn code_from_uri(uri: &str) -> String {
+    let b32 = uri
+        .split("secret=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+    let secret = TotpSecret::from_base32(b32).unwrap();
+    secret.code_at(Utc::now().timestamp() as u64).unwrap()
+}
+
 #[tokio::test]
-async fn signup_then_login_succeeds_and_rejects_wrong_key() {
+async fn full_signup_confirm_login_flow() {
     let app = test_app().await;
     let email = unique_email();
     let auth_key = vec![7u8; 32];
 
-    // signup
-    let (s, _) = call(&app, "/auth/signup", &signup_body(&email, auth_key.clone())).await;
+    // signup → 201 + otpauth provisioning URI
+    let (s, body) = call(&app, "/auth/signup", &signup_body(&email, auth_key.clone())).await;
     assert_eq!(s, StatusCode::CREATED);
+    let uri = body["totp_provisioning_uri"].as_str().unwrap().to_string();
+    assert!(uri.starts_with("otpauth://totp/"));
 
-    // 重複は 409
+    // 重複 signup → 409
     let (s, _) = call(&app, "/auth/signup", &signup_body(&email, auth_key.clone())).await;
     assert_eq!(s, StatusCode::CONFLICT);
 
-    // login begin: 保存した salt と kdf_version を返す
-    let (s, body) = call(
-        &app,
-        "/auth/login/begin",
-        &serde_json::to_value(LoginBeginRequest {
-            email: email.clone(),
-        })
-        .unwrap(),
-    )
-    .await;
-    assert_eq!(s, StatusCode::OK);
-    assert_eq!(body["kdf_version"], 1);
-    assert_eq!(
-        STANDARD.decode(body["salt_pw"].as_str().unwrap()).unwrap(),
-        vec![1, 2, 3, 4]
-    );
-
-    // login verify: 正しい authKey → 200 + totp factor + token
-    let (s, body) = call(
-        &app,
-        "/auth/login/verify",
-        &serde_json::to_value(LoginVerifyRequest {
-            email: email.clone(),
-            auth_key: auth_key.clone(),
-        })
-        .unwrap(),
-    )
-    .await;
-    assert_eq!(s, StatusCode::OK);
-    assert!(!body["login_token"].as_str().unwrap().is_empty());
-    assert_eq!(body["factors"][0], "totp");
-
-    // 誤った authKey → 401 (トークンを返さない)
+    // TOTP 確認前は login 不可 (パスワードが正しくても 403)
     let (s, _) = call(
         &app,
         "/auth/login/verify",
-        &serde_json::to_value(LoginVerifyRequest {
-            email: email.clone(),
-            auth_key: vec![8u8; 32],
-        })
-        .unwrap(),
+        &verify_body(&email, auth_key.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // 誤コード (長さ不正) で confirm → 401
+    let (s, _) = call(
+        &app,
+        "/auth/totp/confirm",
+        &json!({ "email": email, "code": "000" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // 正コードで confirm → 200 (active 化)
+    let (s, _) = call(
+        &app,
+        "/auth/totp/confirm",
+        &json!({ "email": email, "code": code_from_uri(&uri) }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // 二重 confirm → 409 (already confirmed)
+    let (s, _) = call(
+        &app,
+        "/auth/totp/confirm",
+        &json!({ "email": email, "code": code_from_uri(&uri) }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+
+    // login begin → 保存 salt
+    let (s, lb) = call(&app, "/auth/login/begin", &json!({ "email": email })).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(lb["kdf_version"], 1);
+    assert_eq!(
+        STANDARD.decode(lb["salt_pw"].as_str().unwrap()).unwrap(),
+        vec![1, 2, 3, 4]
+    );
+
+    // login verify (active) → 200 + totp factor + token
+    let (s, lv) = call(
+        &app,
+        "/auth/login/verify",
+        &verify_body(&email, auth_key.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!lv["login_token"].as_str().unwrap().is_empty());
+    assert_eq!(lv["factors"][0], "totp");
+
+    // 誤 authKey → 401
+    let (s, _) = call(
+        &app,
+        "/auth/login/verify",
+        &verify_body(&email, vec![8u8; 32]),
     )
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
@@ -126,29 +171,24 @@ async fn signup_then_login_succeeds_and_rejects_wrong_key() {
 async fn login_begin_unknown_email_returns_deterministic_dummy_salt() {
     let app = test_app().await;
     let email = unique_email();
+    let req = json!({ "email": email });
 
-    let req = serde_json::to_value(LoginBeginRequest {
-        email: email.clone(),
-    })
-    .unwrap();
     let (s, body1) = call(&app, "/auth/login/begin", &req).await;
     assert_eq!(s, StatusCode::OK);
     let salt = STANDARD.decode(body1["salt_pw"].as_str().unwrap()).unwrap();
     assert_eq!(salt.len(), 16, "dummy salt is 16 bytes");
 
-    // 同 email は同じダミー salt (決定的)
     let (_, body2) = call(&app, "/auth/login/begin", &req).await;
-    assert_eq!(body1["salt_pw"], body2["salt_pw"]);
+    assert_eq!(
+        body1["salt_pw"], body2["salt_pw"],
+        "deterministic dummy salt"
+    );
 
     // 未登録ユーザーの verify は 401
     let (s, _) = call(
         &app,
         "/auth/login/verify",
-        &serde_json::to_value(LoginVerifyRequest {
-            email,
-            auth_key: vec![5u8; 32],
-        })
-        .unwrap(),
+        &verify_body(&email, vec![5u8; 32]),
     )
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
