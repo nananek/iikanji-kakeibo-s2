@@ -10,7 +10,10 @@ mod common;
 use axum::http::StatusCode;
 use axum::Router;
 use common::*;
+use iikanji_crypto::hash_token;
+use iikanji_server::{router, AppState};
 use serde_json::{json, Value};
+use sqlx::PgPool;
 
 /// signup→confirm→login/verify まで進め、passkey 未登録ユーザーの (まだ消費していない) login_token を返す。
 /// あわせて factors が TOTP のみであることを確認する。
@@ -167,5 +170,122 @@ async fn auth_finish_rejects_bogus_and_issues_no_session() {
         body.get("session_token").is_none(),
         "blob/session を漏らした: {body}"
     );
+    assert!(body.get("mk_pw").is_none());
+}
+
+// ===== 2FA ゲート (期限切れ / 試行超過) が passkey 経路にも効くこと =====
+//
+// pending_logins の expires_at / failed_attempts は TOTP と passkey で共通のゲート。passkey の
+// begin / finish 双方がこのゲートを尊重することを、DB 行を直接操作して確認する。finish のゲートは
+// Json デコード後・assertion 検証前に効くため、パース可能だが暗号的に無効な credential で到達させる。
+
+/// pending_logins を直接操作するため pool 付きでアプリを構築する。
+async fn app_with_pool() -> (Router, PgPool) {
+    let pool = test_pool().await;
+    let app = router(AppState::new(pool.clone(), b"test-secret".to_vec()));
+    (app, pool)
+}
+
+/// login_token の pending_logins 行を期限切れにする。
+async fn expire_login_token(pool: &PgPool, login_token: &str) {
+    sqlx::query(
+        "UPDATE pending_logins SET expires_at = now() - interval '1 hour' WHERE token_hash = $1",
+    )
+    .bind(hash_token(login_token.as_bytes()).to_vec())
+    .execute(pool)
+    .await
+    .expect("expire login token");
+}
+
+/// login_token の 2FA 失敗回数を上限超過まで引き上げる。
+/// 100 は MAX_2FA_ATTEMPTS (現在 5) を確実に超える値 (定数は server 内部 private のため直書き)。
+async fn exhaust_login_attempts(pool: &PgPool, login_token: &str) {
+    sqlx::query("UPDATE pending_logins SET failed_attempts = 100 WHERE token_hash = $1")
+        .bind(hash_token(login_token.as_bytes()).to_vec())
+        .execute(pool)
+        .await
+        .expect("set failed attempts");
+}
+
+/// パース可能だが暗号的に無効な assertion credential (finish のゲートに到達させる用)。
+fn dummy_assertion() -> Value {
+    json!({
+        "id": "AAAA",
+        "rawId": "AAAA",
+        "type": "public-key",
+        "response": {
+            "authenticatorData": "AAAA",
+            "clientDataJSON": "AAAA",
+            "signature": "AAAA"
+        }
+    })
+}
+
+#[tokio::test]
+async fn auth_begin_rejects_expired_login_token() {
+    let (app, pool) = app_with_pool().await;
+    let token = login_token_no_passkey(&app).await;
+    expire_login_token(&pool, &token).await;
+    let (s, _) = request(
+        &app,
+        "POST",
+        "/auth/passkey/auth/begin",
+        None,
+        Some(&json!({ "login_token": token })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn auth_finish_rejects_expired_login_token_without_session() {
+    let (app, pool) = app_with_pool().await;
+    let token = login_token_no_passkey(&app).await;
+    expire_login_token(&pool, &token).await;
+    let (s, body): (StatusCode, Value) = request(
+        &app,
+        "POST",
+        "/auth/passkey/auth/finish",
+        None,
+        Some(&json!({ "login_token": token, "credential": dummy_assertion() })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert!(body.get("session_token").is_none());
+    assert!(body.get("mk_pw").is_none());
+}
+
+#[tokio::test]
+async fn auth_begin_rejects_after_max_2fa_attempts() {
+    let (app, pool) = app_with_pool().await;
+    let token = login_token_no_passkey(&app).await;
+    exhaust_login_attempts(&pool, &token).await;
+    let (s, _) = request(
+        &app,
+        "POST",
+        "/auth/passkey/auth/begin",
+        None,
+        Some(&json!({ "login_token": token })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn auth_finish_rejects_after_max_2fa_attempts_without_session() {
+    let (app, pool) = app_with_pool().await;
+    let token = login_token_no_passkey(&app).await;
+    exhaust_login_attempts(&pool, &token).await;
+    let (s, body): (StatusCode, Value) = request(
+        &app,
+        "POST",
+        "/auth/passkey/auth/finish",
+        None,
+        Some(&json!({ "login_token": token, "credential": dummy_assertion() })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    // invariant 4: 期限切れ側と対称に、blob (session/MK) を返さないことを確認する。
+    assert!(body.get("session_token").is_none());
     assert!(body.get("mk_pw").is_none());
 }

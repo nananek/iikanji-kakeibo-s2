@@ -1,12 +1,11 @@
 import { test, expect, type Page, type CDPSession } from '@playwright/test';
 import { authenticator } from 'otplib';
 
-// passkey (WebAuthn 第2要素) のハッピーパス e2e。**Chromium 限定** — Playwright の仮想認証器は
-// CDP (Chromium) でのみ提供される。RP ID は IP リテラルだとブラウザが拒否するため、本 spec は
-// localhost オリジン (playwright.config.ts の chromium プロジェクトの baseURL) で実行する。
+// passkey (WebAuthn 第2要素) のハッピーパス + 改竄拒否 e2e。**Chromium 限定** — Playwright の
+// 仮想認証器は CDP (Chromium) でのみ提供される。RP ID は IP リテラルだとブラウザが拒否するため、
+// 本 spec は localhost オリジン (playwright.config.ts の chromium プロジェクトの baseURL) で実行する。
 //
-// 検証する流れ: signup+login(TOTP) → パスキー登録 → ログアウト → 再ログイン (パスワード) →
-// 2FA 段で「パスキーで認証」→ DK アンロック → Ledger 到達。passkey は鍵に触れず 2FA を通すだけ。
+// passkey は鍵に触れず 2FA を通すだけ。assertion が無効なら DK はアンロックされない。
 
 function secretFromUri(uri: string): string {
   const s = new URL(uri).searchParams.get('secret');
@@ -38,15 +37,18 @@ async function addVirtualAuthenticator(page: Page): Promise<CDPSession> {
   return client;
 }
 
-test('register a passkey and use it as the second factor at login', async ({ page }) => {
-  const email = `e2e-passkey-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;
-  const password = 'correct horse battery staple';
-
+// signup(TOTP) → 初回 TOTP ログイン → パスキー登録 → ログアウト まで進める。
+// 戻り時はログイン画面で、当該アカウントにパスキーが 1 つ登録済みの状態。
+async function signupLoginAndRegisterPasskey(
+  page: Page,
+  email: string,
+  password: string,
+): Promise<void> {
   await page.goto('/');
-  // 仮想認証器を登録 create() の前に有効化しておく。
+  // 登録 create() の前に仮想認証器を有効化しておく。
   await addVirtualAuthenticator(page);
 
-  // --- signup (TOTP 必須) ---
+  // signup (TOTP 必須)。
   await page.getByTestId('tab-signup').click();
   await page.getByLabel('メール').fill(email);
   await page.getByLabel('パスワード').fill(password);
@@ -57,7 +59,7 @@ test('register a passkey and use it as the second factor at login', async ({ pag
   await page.getByRole('button', { name: '確認' }).click();
   await expect(page.getByTestId('signup-done')).toBeVisible({ timeout: 15_000 });
 
-  // --- 初回ログインは TOTP で (replay 回避のため +1 step) ---
+  // 初回ログインは TOTP で (replay 回避のため +1 step)。
   await page.getByTestId('tab-login').click();
   await page.getByLabel('メール').fill(email);
   await page.getByLabel('パスワード').fill(password);
@@ -66,27 +68,58 @@ test('register a passkey and use it as the second factor at login', async ({ pag
   await page.getByRole('button', { name: '確認' }).click();
   await expect(page.getByTestId('ledger-shell')).toBeVisible({ timeout: 30_000 });
 
-  // --- パスキーを登録 (ログイン済み = TOTP gate 済み) ---
+  // パスキーを登録 (ログイン済み = TOTP gate 済み) → ログアウト。
   await page.getByTestId('passkey-register').click();
   await expect(page.getByTestId('passkey-status')).toContainText('登録しました', {
     timeout: 30_000,
   });
-
-  // --- ログアウト ---
   await page.getByTestId('logout').click();
   await expect(page.getByTestId('tab-login')).toBeVisible();
+}
 
-  // --- 再ログイン: パスワード → 2FA 段で「パスキーで認証」(TOTP コードは入力しない) ---
+// パスワード入力 → 2FA 段まで進め、「パスキーで認証」ボタンを出す。
+async function loginToSecondFactor(page: Page, email: string, password: string): Promise<void> {
   await page.getByTestId('tab-login').click();
   await page.getByLabel('メール').fill(email);
   await page.getByLabel('パスワード').fill(password);
   await page.locator('form').getByRole('button', { name: 'ログイン' }).click();
-  // passkey 登録済みなので factors に passkey が含まれ、ボタンが出る。
-  const passkeyBtn = page.getByTestId('passkey-auth');
-  await expect(passkeyBtn).toBeVisible({ timeout: 30_000 });
-  await passkeyBtn.click();
+  await expect(page.getByTestId('passkey-auth')).toBeVisible({ timeout: 30_000 });
+}
+
+const PASSWORD = 'correct horse battery staple';
+
+test('register a passkey and use it as the second factor at login', async ({ page }) => {
+  const email = `e2e-passkey-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;
+  await signupLoginAndRegisterPasskey(page, email, PASSWORD);
+
+  // 再ログイン: パスワード → 2FA 段で「パスキーで認証」(TOTP コードは入力しない)。
+  await loginToSecondFactor(page, email, PASSWORD);
+  await page.getByTestId('passkey-auth').click();
 
   // assertion 成功 → SessionResponse の blob を wrapKey でアンロック → Ledger 到達。
   await expect(page.getByTestId('ledger-shell')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId('ledger-welcome')).toContainText(email);
+});
+
+test('a tampered passkey assertion is rejected and does not unlock the DK', async ({ page }) => {
+  const email = `e2e-passkey-bad-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;
+  await signupLoginAndRegisterPasskey(page, email, PASSWORD);
+
+  await loginToSecondFactor(page, email, PASSWORD);
+
+  // auth/finish への assertion 署名を改竄する。サーバーの finish_passkey_authentication が
+  // 検証に失敗し 401 を返す経路 (sign_count 後退もこの分岐) を実機で確認する。begin は素通し。
+  await page.route('**/auth/passkey/auth/finish', async (route) => {
+    const data = JSON.parse(route.request().postData() ?? '{}');
+    if (data?.credential?.response) {
+      data.credential.response.signature = 'AAAA'; // パース可だが無効な署名
+    }
+    await route.continue({ postData: JSON.stringify(data) });
+  });
+
+  await page.getByTestId('passkey-auth').click();
+
+  // 認証失敗のエラーが出て、Ledger には到達しない (DK 未アンロック)。
+  await expect(page.getByRole('alert')).toContainText('パスキー認証に失敗', { timeout: 30_000 });
+  await expect(page.getByTestId('ledger-shell')).toHaveCount(0);
 });
