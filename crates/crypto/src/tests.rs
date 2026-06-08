@@ -258,3 +258,55 @@ fn server_helpers_token_hash_and_dummy_salt() {
         server_dummy_salt(b"other", "a@x")
     );
 }
+
+#[test]
+fn totp_verify_replay_and_uri() {
+    let secret = TotpSecret::generate();
+    let t = 1_700_000_000u64;
+    let code = secret.code_at(t).unwrap();
+    assert_eq!(code.len(), 6);
+
+    // 正しいコード → 消費 step を返す
+    let used = secret.verify(&code, t, None).unwrap().expect("valid code");
+    assert_eq!(used, t / 30);
+
+    // replay: 消費済み step 以下は拒否
+    assert_eq!(secret.verify(&code, t, Some(used)).unwrap(), None);
+
+    // 桁数不正 → 拒否 (定数時間比較で長さ不一致)
+    assert_eq!(secret.verify("12345", t, None).unwrap(), None);
+
+    // プロビジョニング URI
+    let uri = secret
+        .provisioning_uri("いいかんじ家計簿", "acct@example.com")
+        .unwrap();
+    assert!(uri.starts_with("otpauth://totp/"));
+    assert!(uri.contains("secret="));
+
+    // base32 ラウンドトリップ (URI から復元 → 同じコード)
+    let b32 = uri
+        .split("secret=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+    let restored = TotpSecret::from_base32(b32).unwrap();
+    assert_eq!(restored.code_at(t).unwrap(), code);
+}
+
+#[test]
+fn at_rest_roundtrip_and_binding() {
+    let key = derive_server_key(b"server-secret", b"totp-at-rest-v1");
+    assert_eq!(key, derive_server_key(b"server-secret", b"totp-at-rest-v1")); // 決定的
+    assert_ne!(key, derive_server_key(b"server-secret", b"other-info"));
+
+    let blob = seal_at_rest(&key, b"totp/user", b"secret-bytes");
+    assert_eq!(
+        open_at_rest(&key, b"totp/user", &blob).unwrap(),
+        b"secret-bytes"
+    );
+    // 文脈不一致・別鍵は失敗
+    assert!(open_at_rest(&key, b"totp/other", &blob).is_err());
+    assert!(open_at_rest(&derive_server_key(b"x", b"y"), b"totp/user", &blob).is_err());
+}

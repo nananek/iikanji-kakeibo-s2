@@ -51,6 +51,36 @@ impl fmt::Debug for KeyBlobs {
     }
 }
 
+/// signup 応答。`totp_provisioning_uri` は otpauth URI に TOTP secret を含むため Debug で伏せる。
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct SignupResponse {
+    pub totp_provisioning_uri: String,
+}
+
+impl fmt::Debug for SignupResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SignupResponse")
+            .field("totp_provisioning_uri", &Redacted)
+            .finish()
+    }
+}
+
+/// TOTP 登録の確認 (signup 直後)。`code` は短命 OTP のため Debug で伏せる。
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct TotpConfirmRequest {
+    pub email: String,
+    pub code: String,
+}
+
+impl fmt::Debug for TotpConfirmRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TotpConfirmRequest")
+            .field("email", &self.email)
+            .field("code", &Redacted)
+            .finish()
+    }
+}
+
 /// アカウント作成。`auth_key` は HKDF(PMK) の 32B。salt_srv とハッシュはサーバーが生成する。
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct SignupRequest {
