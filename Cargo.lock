@@ -872,7 +872,9 @@ name = "iikanji-client"
 version = "0.1.0"
 dependencies = [
  "iikanji-crypto",
+ "iikanji-domain",
  "iikanji-types",
+ "uuid",
  "zeroize",
 ]
 
