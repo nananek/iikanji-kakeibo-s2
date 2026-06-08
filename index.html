@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>いいかんじ™家計簿</title>
+    <!--
+      純 CSR SPA (Trunk)。本体は crates/client の bin `iikanji-client`。
+      本番 CSP / Trusted Types / COOP-COEP は配信時 (server / 静的ホスティング) の
+      HTTP ヘッダで付与する (CLAUDE.md ビルド・ツーリング参照、堅牢化フェーズで実装)。
+    -->
+    <link
+      data-trunk
+      rel="rust"
+      href="crates/client/Cargo.toml"
+      data-bin="iikanji-client"
+      data-wasm-opt="z"
+    />
+  </head>
+  <body></body>
+</html>

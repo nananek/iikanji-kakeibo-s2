@@ -42,3 +42,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower = "0.5"
 http-body-util = "0.1"
+# client (Leptos CSR → WASM)。client crate のみが wasm32 で参照する。
+leptos = { version = "0.8", features = ["csr"] }
+console_error_panic_hook = "0.1"

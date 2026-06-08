@@ -12,6 +12,18 @@ pub enum RecordCryptoError {
     Crypto(CryptoError),
 }
 
+impl std::fmt::Display for RecordCryptoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // RecordError は no_std で Display 非実装のため Debug 表示。
+            RecordCryptoError::Cbor(e) => write!(f, "record CBOR error: {e:?}"),
+            RecordCryptoError::Crypto(e) => write!(f, "record crypto error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RecordCryptoError {}
+
 /// Record を CBOR → DK で暗号化し ciphertext を返す (push 用)。
 pub fn seal_record(
     dk: &DataKey,
