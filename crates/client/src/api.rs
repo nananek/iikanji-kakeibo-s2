@@ -23,7 +23,10 @@ pub enum Method {
 }
 
 /// transport 非依存のリクエスト仕様。base_url は [`Client`] が付与する。
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Debug` は手動実装で `body` を伏せる: 本体 JSON は base64 化された authKey 等を含むため、
+/// `{:?}` ログに平文で出さない (path/クエリは機微でないので表示)。
+#[derive(Clone, PartialEq, Eq)]
 pub struct ApiRequest {
     pub method: Method,
     /// base_url からの相対パス (クエリを含む)。
@@ -32,6 +35,28 @@ pub struct ApiRequest {
     pub body: Option<String>,
     /// `Authorization: Bearer <session_token>` を付与するか。
     pub needs_auth: bool,
+}
+
+/// `ApiRequest` の `body` を長さのみ出す redact 用ヘルパ。
+struct RedactedBody(Option<usize>);
+impl core::fmt::Debug for RedactedBody {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(n) => write!(f, "Some([{n} bytes redacted])"),
+            None => f.write_str("None"),
+        }
+    }
+}
+
+impl core::fmt::Debug for ApiRequest {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ApiRequest")
+            .field("method", &self.method)
+            .field("path", &self.path)
+            .field("body", &RedactedBody(self.body.as_ref().map(|b| b.len())))
+            .field("needs_auth", &self.needs_auth)
+            .finish()
+    }
 }
 
 /// API エラー。サーバー `error.rs` の `{"error": msg}` + HTTP status に対応。
@@ -178,9 +203,12 @@ mod wasm_client {
     use iikanji_types::sync::{CursorResponse, PullResponse, PushResponse};
 
     /// ブラウザ fetch によるサーバークライアント。session_token を保持する (メモリのみ)。
+    ///
+    /// session_token は MK/DK より秘匿度は低いが、なりすまし可能なアクセストークンのため
+    /// `Zeroizing<String>` で保持し、置換/破棄/drop 時にヒープを zeroize する。
     pub struct Client {
         base_url: String,
-        session_token: Option<String>,
+        session_token: Option<zeroize::Zeroizing<String>>,
     }
 
     impl Client {
@@ -194,10 +222,10 @@ mod wasm_client {
 
         /// 2FA 通過後のセッショントークンを設定する。
         pub fn set_session_token(&mut self, token: String) {
-            self.session_token = Some(token);
+            self.session_token = Some(zeroize::Zeroizing::new(token));
         }
 
-        /// ログアウト等でセッションを破棄する。
+        /// ログアウト等でセッションを破棄する (旧トークンは drop で zeroize)。
         pub fn clear_session_token(&mut self) {
             self.session_token = None;
         }
@@ -210,7 +238,7 @@ mod wasm_client {
             };
             let builder = if r.needs_auth {
                 match &self.session_token {
-                    Some(t) => builder.header("Authorization", &format!("Bearer {t}")),
+                    Some(t) => builder.header("Authorization", &format!("Bearer {}", t.as_str())),
                     None => return Err(ApiError::Network("missing session token".into())),
                 }
             } else {
@@ -364,6 +392,8 @@ mod tests {
         })
         .unwrap();
         assert_eq!(verify.path, "/auth/login/verify");
+        // authKey は送るが Bearer トークンは不要 (設計上正しい)。
+        assert!(!verify.needs_auth);
 
         let twofa = totp_2fa_request(&TotpVerifyRequest {
             login_token: "tok".into(),
@@ -372,6 +402,23 @@ mod tests {
         .unwrap();
         assert_eq!(twofa.path, "/auth/2fa/totp");
         assert!(!twofa.needs_auth);
+    }
+
+    #[test]
+    fn debug_redacts_request_body() {
+        // body (authKey 等を含む JSON) は {:?} に平文で出さない。
+        let dbg = format!("{:?}", signup_request(&signup_dto()).unwrap());
+        assert!(
+            dbg.contains("bytes redacted]"),
+            "body should be redacted: {dbg}"
+        );
+        assert!(!dbg.contains("a@example.com"), "email leaked: {dbg}");
+        assert!(
+            dbg.contains("/auth/signup"),
+            "path should be visible: {dbg}"
+        );
+        // 本体なしの GET は None と表示。
+        assert!(format!("{:?}", cursor_request()).contains("body: None"));
     }
 
     #[test]
