@@ -22,6 +22,13 @@ use crate::error::AppError;
 use crate::AppState;
 
 const TOTP_ISSUER: &str = "いいかんじ家計簿";
+/// TOTP confirm の失敗許容回数。超えるとアカウント単位でロック (ブルートフォース緩和)。
+const MAX_TOTP_CONFIRM_ATTEMPTS: i32 = 10;
+
+/// `users.status` の値 (typo 防止のため定数化)。
+mod status {
+    pub const ACTIVE: &str = "active";
+}
 
 fn auth_key_from(bytes: &[u8]) -> Result<AuthKey, AppError> {
     let arr: [u8; 32] = bytes
@@ -118,7 +125,7 @@ pub async fn totp_confirm(
     // 行ロックを取って SELECT→検証→UPDATE を 1 tx で行い、並行 confirm の TOCTOU を防ぐ。
     let mut tx = st.pool.begin().await?;
     let row = sqlx::query(
-        "SELECT u.id, u.status, t.secret_enc, t.last_used_step \
+        "SELECT u.id, u.status, t.secret_enc, t.last_used_step, t.failed_attempts \
          FROM users u JOIN totp_secrets t ON t.user_id = u.id \
          WHERE u.email = $1 FOR UPDATE OF u, t",
     )
@@ -128,8 +135,11 @@ pub async fn totp_confirm(
     .ok_or(AppError::Unauthorized)?;
 
     let user_id: Uuid = row.get("id");
-    if row.get::<String, _>("status") == "active" {
+    if row.get::<String, _>("status") == status::ACTIVE {
         return Err(AppError::Conflict("totp already confirmed"));
+    }
+    if row.get::<i32, _>("failed_attempts") >= MAX_TOTP_CONFIRM_ATTEMPTS {
+        return Err(AppError::TooManyRequests);
     }
     let secret_enc: Vec<u8> = row.get("secret_enc");
     let last_used_step: Option<i64> = row.get("last_used_step");
@@ -139,21 +149,36 @@ pub async fn totp_confirm(
         &totp_context(user_id),
         &secret_enc,
     )?);
-    let step = secret
-        .verify(&req.code, now_unix(), last_used_step.map(|s| s as u64))?
-        .ok_or(AppError::Unauthorized)?;
 
-    sqlx::query("UPDATE totp_secrets SET enabled = true, last_used_step = $2 WHERE user_id = $1")
-        .bind(user_id)
-        .bind(step as i64)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("UPDATE users SET status = 'active', updated_at = now() WHERE id = $1")
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(StatusCode::OK)
+    match secret.verify(&req.code, now_unix(), last_used_step.map(|s| s as u64))? {
+        Some(step) => {
+            sqlx::query(
+                "UPDATE totp_secrets SET enabled = true, last_used_step = $2, failed_attempts = 0 \
+                 WHERE user_id = $1",
+            )
+            .bind(user_id)
+            .bind(step as i64)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("UPDATE users SET status = 'active', updated_at = now() WHERE id = $1")
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            Ok(StatusCode::OK)
+        }
+        None => {
+            // 失敗回数を加算して commit (ロールバックで失われないように)。
+            sqlx::query(
+                "UPDATE totp_secrets SET failed_attempts = failed_attempts + 1 WHERE user_id = $1",
+            )
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            Err(AppError::Unauthorized)
+        }
+    }
 }
 
 pub async fn login_begin(
@@ -193,7 +218,7 @@ pub async fn login_verify(
             // パスワード正 かつ active のときのみ成功。未確定/非 active も 401 に統一し、
             // status code からパスワードの正否が漏れないようにする (enumeration 対策)。
             if verify_auth_key(&auth_key, &hash).unwrap_or(false)
-                && r.get::<String, _>("status") == "active"
+                && r.get::<String, _>("status") == status::ACTIVE
             {
                 Some(r.get::<Uuid, _>("id"))
             } else {

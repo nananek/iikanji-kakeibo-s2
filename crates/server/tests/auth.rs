@@ -168,6 +168,42 @@ async fn full_signup_confirm_login_flow() {
 }
 
 #[tokio::test]
+async fn totp_confirm_locks_after_repeated_failures() {
+    let app = test_app().await;
+    let email = unique_email();
+    let (s, body) = call(&app, "/auth/signup", &signup_body(&email, vec![3u8; 32])).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let uri = body["totp_provisioning_uri"].as_str().unwrap().to_string();
+
+    // 10 回失敗まで 401、その後はロックで 429。
+    for _ in 0..10 {
+        let (s, _) = call(
+            &app,
+            "/auth/totp/confirm",
+            &json!({ "email": email, "code": "000" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+    let (s, _) = call(
+        &app,
+        "/auth/totp/confirm",
+        &json!({ "email": email, "code": "000" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+
+    // ロック中は正しいコードでも 429。
+    let (s, _) = call(
+        &app,
+        "/auth/totp/confirm",
+        &json!({ "email": email, "code": code_from_uri(&uri) }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
 async fn login_begin_unknown_email_returns_deterministic_dummy_salt() {
     let app = test_app().await;
     let email = unique_email();

@@ -24,8 +24,8 @@ pub use error::AppError;
 pub struct AppState {
     pub pool: PgPool,
     pub server_secret: Vec<u8>,
-    /// TOTP 秘密の at-rest 暗号鍵 (server_secret 由来)。E2EE 鍵ツリーとは別。
-    pub totp_key: [u8; 32],
+    /// TOTP 秘密の at-rest 暗号鍵 (server_secret 由来)。E2EE 鍵ツリーとは別。drop 時に zeroize。
+    pub totp_key: zeroize::Zeroizing<[u8; 32]>,
     /// 未知ユーザーの login_verify で timing を平準化する固定ダミー PHC。
     pub dummy_phc: String,
 }
@@ -35,7 +35,8 @@ impl AppState {
         let dummy = AuthKey::from_wire_bytes([0u8; 32]);
         let dummy_phc =
             hash_auth_key(&dummy, KdfParams::SERVER_V1).expect("dummy hash never fails");
-        let totp_key = derive_server_key(&server_secret, b"totp-at-rest-v1");
+        let totp_key =
+            zeroize::Zeroizing::new(derive_server_key(&server_secret, b"totp-at-rest-v1"));
         Self {
             pool,
             server_secret,
