@@ -348,8 +348,11 @@ pub async fn totp_2fa(
             .bind("dk-wrap")
             .fetch_one(&mut *tx)
             .await?;
+    // sync_cursor の正統な源泉は user_seq.next_seq (per-user 単調カウンタ)。
+    // レコード 0 件なら next_seq=1 → cursor=0。MAX(enc_records.seq) は seq の抜けで
+    // ずれ得るうえ全スキャンになるため使わない。
     let sync_cursor: i64 =
-        sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM enc_records WHERE user_id = $1")
+        sqlx::query_scalar("SELECT next_seq - 1 FROM user_seq WHERE user_id = $1")
             .bind(user_id)
             .fetch_one(&mut *tx)
             .await?;

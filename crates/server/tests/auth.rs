@@ -240,6 +240,33 @@ async fn totp_2fa_rejects_wrong_code_and_invalid_token() {
 }
 
 #[tokio::test]
+async fn totp_2fa_locks_token_after_max_attempts() {
+    let app = test_app().await;
+    let (uri, login_token) = register_and_login(&app).await;
+
+    // 失敗を上限まで繰り返す → すべて 401、上限到達でトークン破棄。
+    for _ in 0..6 {
+        let (s, _) = call(
+            &app,
+            "/auth/2fa/totp",
+            &json!({ "login_token": login_token.clone(), "code": "000" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+
+    // トークン破棄後は正しいコードでも 401 (再 login が必要)。
+    let next = Utc::now().timestamp() as u64 + 30;
+    let (s, _) = call(
+        &app,
+        "/auth/2fa/totp",
+        &json!({ "login_token": login_token, "code": code_from_uri_at(&uri, next) }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn totp_confirm_locks_after_repeated_failures() {
     let app = test_app().await;
     let email = unique_email();
