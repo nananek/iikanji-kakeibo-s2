@@ -34,7 +34,7 @@ fn build_csp(index_html: &str) -> Result<String> {
     Ok(format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-{hash}'; \
          worker-src 'self' blob:; connect-src 'self'; img-src 'self' data:; \
-         style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; \
+         style-src 'self'; object-src 'none'; base-uri 'self'; \
          form-action 'self'; frame-ancestors 'none'"
     ))
 }
