@@ -9,11 +9,14 @@
 
 use gloo_worker::oneshot::oneshot;
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use iikanji_crypto::{argon2_hash, KdfParams};
 
-/// worker への入力。
-#[derive(Serialize, Deserialize)]
+/// worker への入力。`password` は鍵素材なので drop 時にゼロ化する (メイン側 input・worker 側
+/// デシリアライズ結果の両方)。gloo-worker 内部の bincode/postMessage バッファは呼び出し側から
+/// ゼロ化できない構造的制約がある (issue #12)。
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct ArgonInput {
     pub password: Vec<u8>,
     pub salt: Vec<u8>,
