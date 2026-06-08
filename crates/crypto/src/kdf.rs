@@ -69,7 +69,20 @@ impl KdfParams {
 
 /// password + salt から PMK (Password-derived Master Key) を導出する。
 pub fn derive_pmk(password: &[u8], salt: &[u8], params: KdfParams) -> Result<Pmk> {
-    Ok(Pmk::from_bytes(argon2_raw(password, salt, params)?))
+    Ok(pmk_from_hash(argon2_raw(password, salt, params)?))
+}
+
+/// **Web Worker でメインスレッドを塞がずに** Argon2id を回すための公開 API。
+/// 出力は PMK 材料 (= [`derive_pmk`] の Argon2id 部分そのもの)。同一オリジンの worker 内で用い、
+/// 結果は [`pmk_from_hash`] で `Pmk` に戻す。**ネットワークへ出さない** (PMK 不変条件は不変)。
+pub fn argon2_hash(password: &[u8], salt: &[u8], params: KdfParams) -> Result<[u8; 32]> {
+    argon2_raw(password, salt, params)
+}
+
+/// [`argon2_hash`] が返した PMK 材料から `Pmk` を復元する (Web Worker パスのメインスレッド側)。
+/// 恒等: `derive_pmk(pw, salt, p) == pmk_from_hash(argon2_hash(pw, salt, p))`。
+pub fn pmk_from_hash(hash: [u8; 32]) -> Pmk {
+    Pmk::from_bytes(hash)
 }
 
 /// 新しい password salt (16B) を OS CSPRNG から生成する (signup 時にクライアントが使う)。

@@ -21,7 +21,10 @@ mod app;
 mod ui;
 
 pub use api::{ApiError, ApiRequest, Method};
-pub use crypto_glue::{build_signup, derive_login, unlock_data_key, LoginKeys, SignupOutput};
+pub use crypto_glue::{
+    build_signup, build_signup_from_pmk, derive_login, login_keys_from_pmk, unlock_data_key,
+    LoginKeys, SignupOutput,
+};
 pub use records::{open_record, seal_record, RecordCryptoError};
 pub use sync::{reconcile, resolve, RemoteRecord};
 

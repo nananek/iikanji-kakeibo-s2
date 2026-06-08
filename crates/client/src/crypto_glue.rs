@@ -6,7 +6,7 @@
 use iikanji_crypto::{
     derive_pmk, generate_salt, unwrap_data_key, unwrap_master_key_with_password, wrap_data_key,
     wrap_master_key_with_password, wrap_master_key_with_recovery, DataKey, KdfParams, MasterKey,
-    RecoveryCode, Result, WrapKey,
+    Pmk, RecoveryCode, Result, WrapKey,
 };
 use iikanji_types::{KeyBlobs, SignupRequest};
 use zeroize::Zeroizing;
@@ -30,6 +30,19 @@ pub fn build_signup(email: &str, password: &str, kdf_version: u8) -> Result<Sign
     let params = KdfParams::from_version(kdf_version)?;
     let salt_pw = generate_salt();
     let pmk = derive_pmk(password.as_bytes(), &salt_pw, params)?;
+    build_signup_from_pmk(email, &pmk, salt_pw.to_vec(), kdf_version)
+}
+
+/// Argon2id を別スレッド(Web Worker)で回した場合の signup ペイロード構築。
+/// `pmk` は `iikanji_crypto::pmk_from_hash(argon2_hash(password, salt_pw, params))` で得たもの、
+/// `salt_pw` はその Argon2id に用いた salt と同一。残りの軽い処理 (HKDF/MK/DK/wrap) を行う。
+pub fn build_signup_from_pmk(
+    email: &str,
+    pmk: &Pmk,
+    salt_pw: Vec<u8>,
+    kdf_version: u8,
+) -> Result<SignupOutput> {
+    let params = KdfParams::from_version(kdf_version)?;
     let auth_key = pmk.auth_key().expose_bytes().to_vec();
     let wrap_key = pmk.wrap_key();
 
@@ -48,7 +61,7 @@ pub fn build_signup(email: &str, password: &str, kdf_version: u8) -> Result<Sign
     Ok(SignupOutput {
         request: SignupRequest {
             email: email.to_string(),
-            salt_pw: salt_pw.to_vec(),
+            salt_pw,
             kdf_version,
             auth_key,
             key_blobs: KeyBlobs {
@@ -80,10 +93,16 @@ impl LoginKeys {
 pub fn derive_login(password: &str, salt_pw: &[u8], kdf_version: u8) -> Result<LoginKeys> {
     let params = KdfParams::from_version(kdf_version)?;
     let pmk = derive_pmk(password.as_bytes(), salt_pw, params)?;
-    Ok(LoginKeys {
+    Ok(login_keys_from_pmk(&pmk))
+}
+
+/// Argon2id を別スレッド(Web Worker)で回した場合の login 鍵導出。
+/// `pmk` は `iikanji_crypto::pmk_from_hash(argon2_hash(password, salt_pw, params))` で得たもの。
+pub fn login_keys_from_pmk(pmk: &Pmk) -> LoginKeys {
+    LoginKeys {
         auth_key: Zeroizing::new(pmk.auth_key().expose_bytes().to_vec()),
         wrap_key: pmk.wrap_key(),
-    })
+    }
 }
 
 /// 2FA 通過後: SessionResponse の `mk_pw` / `dk_wrap` blob から DK を復元する (メモリ保持)。
@@ -99,10 +118,64 @@ pub fn unlock_data_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iikanji_crypto::{decrypt_record, encrypt_record, hash_auth_key, verify_auth_key, AuthKey};
+    use iikanji_crypto::{
+        argon2_hash, decrypt_record, encrypt_record, hash_auth_key, pmk_from_hash, verify_auth_key,
+        AuthKey,
+    };
 
     fn arr(v: &[u8]) -> [u8; 32] {
         <[u8; 32]>::try_from(v).unwrap()
+    }
+
+    #[test]
+    fn worker_path_matches_inline_argon() {
+        // 恒等: derive_pmk == pmk_from_hash(argon2_hash(..)) (authKey で比較)。
+        let salt = generate_salt();
+        let params = KdfParams::from_version(1).unwrap();
+        let inline = derive_pmk(b"pw", &salt, params).unwrap();
+        let split = pmk_from_hash(argon2_hash(b"pw", &salt, params).unwrap());
+        assert_eq!(
+            inline.auth_key().expose_bytes(),
+            split.auth_key().expose_bytes()
+        );
+    }
+
+    #[test]
+    fn worker_path_signup_login_unlock_roundtrip() {
+        // Web Worker パス: Argon2 を別関数で回し、残りを *_from_pmk で構築/導出する。
+        let params = KdfParams::from_version(1).unwrap();
+        let salt = generate_salt();
+        let pmk = pmk_from_hash(argon2_hash(b"pw worker", &salt, params).unwrap());
+        let out = build_signup_from_pmk("a@b.c", &pmk, salt.to_vec(), 1).unwrap();
+        assert_eq!(out.request.salt_pw, salt.to_vec());
+
+        // signup の DK で暗号化。
+        let id = [3u8; 16];
+        let ct = encrypt_record(&out.data_key, 1, &id, 1, b"amount:1280");
+
+        // login パス (begin で得た salt から再導出)。
+        let pmk2 = pmk_from_hash(argon2_hash(b"pw worker", &out.request.salt_pw, params).unwrap());
+        let lk = login_keys_from_pmk(&pmk2);
+        assert_eq!(lk.auth_key(), out.request.auth_key.as_slice());
+        // blob から DK を復元し、signup DK の ciphertext を復号できる。
+        let dk = unlock_data_key(
+            &lk,
+            &out.request.key_blobs.mk_pw,
+            &out.request.key_blobs.dk_wrap,
+        )
+        .unwrap();
+        assert_eq!(decrypt_record(&dk, 1, &id, 1, &ct).unwrap(), b"amount:1280");
+
+        // 誤 password の Argon2 では unlock 失敗。
+        let bad = login_keys_from_pmk(&pmk_from_hash(
+            argon2_hash(b"wrong", &out.request.salt_pw, params).unwrap(),
+        ));
+        assert!(unlock_data_key(
+            &bad,
+            &out.request.key_blobs.mk_pw,
+            &out.request.key_blobs.dk_wrap
+        )
+        .is_err());
     }
 
     #[test]
