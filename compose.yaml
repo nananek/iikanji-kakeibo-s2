@@ -29,6 +29,10 @@ services:
       SERVER_SECRET: change-me-please-use-a-random-secret
       BIND_ADDR: 0.0.0.0:8080
       RUST_LOG: info
+      # passkey の RP ID / origin。ローカルは http://localhost:8080 でアクセスするため既定値で動く。
+      # 本番ドメインで配信するなら実ホスト名 + https オリジンへ変更すること (docs/DEPLOY.md 参照)。
+      WEBAUTHN_RP_ID: localhost
+      WEBAUTHN_ORIGIN: http://localhost:8080
     ports:
       - "8080:8080"
 
