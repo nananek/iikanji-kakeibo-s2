@@ -10,3 +10,4 @@ publish = false
 [dependencies]
 iikanji-crypto = { path = "../crypto" }
 iikanji-types = { path = "../types" }
+zeroize = { workspace = true }

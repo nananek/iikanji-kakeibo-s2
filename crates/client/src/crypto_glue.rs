@@ -9,6 +9,7 @@ use iikanji_crypto::{
     RecoveryCode, Result, WrapKey,
 };
 use iikanji_types::{KeyBlobs, SignupRequest};
+use zeroize::Zeroizing;
 
 /// recovery code 由来 Argon2id の salt。recovery code が 160-bit と高エントロピーのため
 /// 固定 salt で許容する (Argon2 は belt-and-suspenders)。recovery エンドポイント実装時に
@@ -35,6 +36,8 @@ pub fn build_signup(email: &str, password: &str, kdf_version: u8) -> Result<Sign
     let mk = MasterKey::generate();
     let dk = DataKey::generate();
 
+    // mk_pw は kdf_version をヘッダに刻む (blob 自己記述 / backup 用)。mk_recovery は
+    // recovery 鍵を別 KDF(固定 salt)で導出するため kdf_id=0 (crypto 側既定) で良い。
     let mk_pw = wrap_master_key_with_password(&wrap_key, &mk, kdf_version);
     let dk_wrap = wrap_data_key(&mk, &dk);
 
@@ -60,15 +63,16 @@ pub fn build_signup(email: &str, password: &str, kdf_version: u8) -> Result<Sign
 }
 
 /// login 第1段の鍵。`auth_key` をサーバーへ送り、`wrap_key` は 2FA 通過後の unlock 用に保持する。
+/// `auth_key` は機密性は低い (送信値) が drop 時にゼロ化する。`wrap_key` は crypto 側で zeroize 済み。
 pub struct LoginKeys {
-    auth_key: Vec<u8>,
+    auth_key: Zeroizing<Vec<u8>>,
     wrap_key: WrapKey,
 }
 
 impl LoginKeys {
     /// サーバーへ送る login 証明 (HKDF(PMK))。
     pub fn auth_key(&self) -> &[u8] {
-        &self.auth_key
+        self.auth_key.as_slice()
     }
 }
 
@@ -77,7 +81,7 @@ pub fn derive_login(password: &str, salt_pw: &[u8], kdf_version: u8) -> Result<L
     let params = KdfParams::from_version(kdf_version)?;
     let pmk = derive_pmk(password.as_bytes(), salt_pw, params)?;
     Ok(LoginKeys {
-        auth_key: pmk.auth_key().expose_bytes().to_vec(),
+        auth_key: Zeroizing::new(pmk.auth_key().expose_bytes().to_vec()),
         wrap_key: pmk.wrap_key(),
     })
 }
