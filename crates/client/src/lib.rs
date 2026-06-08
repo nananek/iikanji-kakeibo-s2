@@ -14,9 +14,11 @@ mod crypto_glue;
 mod records;
 mod sync;
 
-// Leptos UI シェルは wasm32 限定 (native ビルドには Leptos を持ち込まない)。
+// Leptos UI は wasm32 限定 (native ビルドには Leptos を持ち込まない)。
 #[cfg(target_arch = "wasm32")]
 mod app;
+#[cfg(target_arch = "wasm32")]
+mod ui;
 
 pub use api::{ApiError, ApiRequest, Method};
 pub use crypto_glue::{build_signup, derive_login, unlock_data_key, LoginKeys, SignupOutput};

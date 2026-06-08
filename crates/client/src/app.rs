@@ -8,16 +8,16 @@
 
 use leptos::prelude::*;
 
-/// ルートコンポーネント。現状はビルド疎通確認用のシェル。
+use crate::ui::SignupForm;
+
+/// ルートコンポーネント。アプリシェル + 認証 UI (現状は signup ceremony)。
 #[component]
 pub fn App() -> impl IntoView {
     view! {
         <main class="app-shell">
             <h1>"いいかんじ™家計簿"</h1>
             <p class="tagline">"E2EE 複式簿記の家計簿"</p>
-            <p class="status">
-                "クライアントスキャフォルド — 認証・同期 UI は後続 PR で実装します。"
-            </p>
+            <SignupForm />
         </main>
     }
 }
