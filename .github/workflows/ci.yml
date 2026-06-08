@@ -71,6 +71,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build wasm-targeted crates
         run: cargo build --target wasm32-unknown-unknown -p iikanji-crypto -p iikanji-domain -p iikanji-types -p iikanji-client
+      - name: Build domain (serde/records) for wasm
+        run: cargo build --target wasm32-unknown-unknown -p iikanji-domain --features serde
 
   # E2E: Leptos client 実装までは scaffold (spec が無ければ green で通す)。
   # tests/e2e/*.spec.* が追加された時点で Playwright を自動実行する。

@@ -11,6 +11,7 @@ use core::fmt;
 
 /// 勘定科目コード (例: "1010")。ユーザー追加科目も扱えるよう文字列で保持する。
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AccountCode(String);
 
 impl AccountCode {
@@ -42,6 +43,7 @@ impl fmt::Display for AccountCode {
 
 /// 勘定科目の 5 区分。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AccountType {
     Asset,
     Liability,
@@ -69,6 +71,7 @@ impl AccountType {
 
 /// 確定申告の税区分 (集計用)。`Ord` は宣言順 (集計の安定した並びに使う)。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TaxCategory {
     /// 医療費控除
     Medical,
@@ -90,6 +93,7 @@ pub enum TaxCategory {
 
 /// 費目の性質 (月次比較・着地予測で使用)。割り当ては暫定で、reports PR で調整しうる。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CostType {
     /// 固定費
     Fixed,
@@ -101,6 +105,7 @@ pub enum CostType {
 
 /// 特殊な役割を持つ科目 (締め処理等で参照)。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SystemRole {
     /// 元入金
     Capital,
@@ -326,7 +331,8 @@ pub fn standard_chart() -> &'static [StandardAccountDef] {
 }
 
 /// 実効的な勘定科目 1 件 (カタログ + ユーザー差分を反映したもの)。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AccountInfo {
     pub code: AccountCode,
     pub account_type: AccountType,

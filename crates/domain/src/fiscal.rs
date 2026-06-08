@@ -36,6 +36,7 @@ pub enum FiscalError {
 
 /// 1 年度の月次確定状態。`closed_period` は前方向にのみ進む。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FiscalClose {
     year: i32,
     closed_period: i8,

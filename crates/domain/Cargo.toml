@@ -8,5 +8,11 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-# 第一スライスは外部依存ゼロ (core + alloc のみ)。
-# serde は records 連携 PR で `default-features=false, features=["alloc","derive"]` 追加予定。
+# 純ロジック本体は外部依存ゼロ (core + alloc)。
+# `serde` feature 有効時のみ records (CBOR) コーデックを含む。
+serde = { workspace = true, optional = true, default-features = false, features = ["alloc", "derive"] }
+ciborium = { workspace = true, optional = true }
+
+[features]
+# レコード平文 DTO の serde + CBOR 版管理コーデック。client/server 連携で有効化。
+serde = ["dep:serde", "dep:ciborium"]

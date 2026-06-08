@@ -21,6 +21,8 @@ mod ledger;
 mod medical;
 mod money;
 mod monthly;
+#[cfg(feature = "serde")]
+mod records;
 mod statements;
 mod tax;
 
@@ -52,6 +54,10 @@ pub use money::Yen;
 pub use monthly::{
     monthly_comparison, project_month, AccountProjection, MonthProjection, MonthlyComparison,
     MonthlyRow, ProjectionMethod,
+};
+#[cfg(feature = "serde")]
+pub use records::{
+    decode, encode, record_type, Record, RecordError, RecordPayload, RECORD_SCHEMA_VERSION,
 };
 pub use statements::{
     balance_sheet, income_expense_summary, income_statement, BalanceSheet, IncomeExpenseSummary,
