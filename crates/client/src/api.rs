@@ -206,6 +206,10 @@ mod wasm_client {
     ///
     /// session_token は MK/DK より秘匿度は低いが、なりすまし可能なアクセストークンのため
     /// `Zeroizing<String>` で保持し、置換/破棄/drop 時にヒープを zeroize する。
+    ///
+    /// `Clone` 可: `StoredValue` 保持の Session から非同期処理の前にクローンして取り出すため
+    /// (借用を `.await` をまたいで保持しない)。クローンは `Zeroizing` ごとコピーされ drop で zeroize。
+    #[derive(Clone)]
     pub struct Client {
         base_url: String,
         session_token: Option<zeroize::Zeroizing<String>>,

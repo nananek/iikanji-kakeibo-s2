@@ -16,10 +16,14 @@ use leptos::task::spawn_local;
 
 use crate::api::Client;
 use crate::crypto_glue::{build_signup, derive_login, unlock_data_key, LoginKeys};
+use crate::records::{open_record, seal_record};
 use iikanji_crypto::DataKey;
+use iikanji_domain::{AccountCode, Date, EntryLine, JournalEntry, Record, RecordPayload, Yen};
 use iikanji_types::auth::{
     LoginBeginRequest, LoginVerifyRequest, TotpConfirmRequest, TotpVerifyRequest,
 };
+use iikanji_types::sync::{EncRecord, PushChange, PushRequest};
+use uuid::Uuid;
 
 /// signup ceremony の段階。
 #[derive(Clone)]
@@ -202,14 +206,12 @@ enum LoginStep {
 /// アプリ状態として保持する。**メモリのみ** — IndexedDB 等へ永続化しない。drop で DK/トークンを
 /// zeroize する (`DataKey` は ZeroizeOnDrop、`Client` の token は `Zeroizing`)。
 pub struct Session {
-    /// 復元した Data Key。財務レコードの seal/open に使う (利用は PR-3c2)。
-    #[allow(dead_code)]
-    pub dk: DataKey,
-    /// セッショントークンを持つ API クライアント。sync push/pull に使う (利用は PR-3c2)。
-    #[allow(dead_code)]
-    pub client: Client,
-    pub email: String,
-    pub cursor: u64,
+    /// 復元した Data Key。財務レコードの seal/open に使う。
+    pub(crate) dk: DataKey,
+    /// セッショントークンを持つ API クライアント。sync push/pull に使う。
+    pub(crate) client: Client,
+    pub(crate) email: String,
+    pub(crate) cursor: u64,
 }
 
 /// login フォーム + TOTP 2FA + DK アンロック。成功で `session` を確立し `logged_in` を立てる。
@@ -329,7 +331,8 @@ pub fn LoginForm(
                     return;
                 }
             };
-            // セッショントークンで認証付き API (cursor) を実行し、疎通確認 + 初期カーソル取得。
+            drop(keys); // wrapKey を即破棄 (cursor 往復より前に生存窓を最小化)。
+                        // セッショントークンで認証付き API (cursor) を実行し、疎通確認 + 初期カーソル取得。
             client.set_session_token(session_resp.session_token);
             match client.cursor().await {
                 Ok(c) => {
@@ -430,12 +433,272 @@ pub fn LedgerShell(
 
     view! {
         <section class="ledger" data-testid="ledger-shell">
-            <p data-testid="ledger-welcome">{format!("ログイン中: {email}")}</p>
-            <p class="muted">{format!("同期カーソル: {cursor}")}</p>
-            <button data-testid="logout" on:click=on_logout>
-                "ログアウト"
-            </button>
-            <p class="muted">"仕訳入力・残高表示は次の PR で追加します。"</p>
+            <header class="ledger-header">
+                <p data-testid="ledger-welcome">{format!("ログイン中: {email}")}</p>
+                <p class="muted">{format!("同期カーソル: {cursor}")}</p>
+                <button data-testid="logout" on:click=on_logout>
+                    "ログアウト"
+                </button>
+            </header>
+            <LedgerView session=session />
         </section>
+    }
+}
+
+/// フォーム入力から複式仕訳を組み立てる (借方=貸方の 2 行)。
+fn build_entry(
+    date: &str,
+    description: &str,
+    debit: &str,
+    credit: &str,
+    amount: &str,
+) -> Result<JournalEntry, String> {
+    let p: Vec<&str> = date.split('-').collect();
+    if p.len() != 3 {
+        return Err("日付は YYYY-MM-DD 形式で入力してください".into());
+    }
+    let y = p[0]
+        .parse::<i32>()
+        .map_err(|_| "年が不正です".to_string())?;
+    let m = p[1].parse::<u8>().map_err(|_| "月が不正です".to_string())?;
+    let d = p[2].parse::<u8>().map_err(|_| "日が不正です".to_string())?;
+    let date = Date::new(y, m, d).map_err(|_| "日付が不正です".to_string())?;
+    let amt = amount
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| "金額は整数 (円) で入力してください".to_string())?;
+    if amt <= 0 {
+        return Err("金額は正の整数で入力してください".into());
+    }
+    if debit.trim().is_empty() || credit.trim().is_empty() {
+        return Err("借方・貸方の科目コードを入力してください".into());
+    }
+    Ok(JournalEntry {
+        date,
+        description: description.to_string(),
+        lines: vec![
+            EntryLine::debit(AccountCode::from(debit.trim()), Yen::new(amt)),
+            EntryLine::credit(AccountCode::from(credit.trim()), Yen::new(amt)),
+        ],
+    })
+}
+
+/// pull した EncRecord 群を DK で復号し、仕訳のみ (id, JournalEntry) を取り出す。
+fn decode_entries(session: &Option<Session>, records: &[EncRecord]) -> Vec<(Uuid, JournalEntry)> {
+    let Some(sess) = session else {
+        return Vec::new();
+    };
+    records
+        .iter()
+        .filter_map(|r| {
+            let ct = r.ciphertext.as_ref()?;
+            let rec = open_record(&sess.dk, r.record_id, r.version, r.record_type, ct).ok()?;
+            match rec.payload {
+                RecordPayload::JournalEntry(j) => Some((r.record_id, j)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// 仕訳の借方合計 (= 貸方合計)。一覧の金額表示用。
+fn entry_total(entry: &JournalEntry) -> Yen {
+    entry.lines.iter().map(|l| l.debit).sum()
+}
+
+/// 仕訳入力フォーム + 一覧。DK で seal/open し、API で push/pull する E2EE 同期ループ。
+#[component]
+pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
+    let entries = RwSignal::new(Vec::<(Uuid, JournalEntry)>::new());
+    let error = RwSignal::new(Option::<String>::None);
+    let busy = RwSignal::new(false);
+
+    let date = RwSignal::new(String::new());
+    let desc = RwSignal::new(String::new());
+    let debit = RwSignal::new(String::new());
+    let credit = RwSignal::new(String::new());
+    let amount = RwSignal::new(String::new());
+
+    // サーバーから全レコードを pull → DK で復号 → 一覧へ反映。
+    let load = move || {
+        let Some(client) = session.with_value(|s| s.as_ref().map(|s| s.client.clone())) else {
+            return;
+        };
+        spawn_local(async move {
+            match client.pull(0).await {
+                Ok(resp) => {
+                    let decoded = session.with_value(|s| decode_entries(s, &resp.records));
+                    entries.set(decoded);
+                }
+                Err(e) => error.set(Some(format!("読込に失敗しました: {e}"))),
+            }
+        });
+    };
+    // 初回ロード。
+    load();
+
+    let on_add = move |ev: SubmitEvent| {
+        ev.prevent_default();
+        if busy.get() {
+            return;
+        }
+        let entry = match build_entry(
+            &date.get(),
+            &desc.get(),
+            &debit.get(),
+            &credit.get(),
+            &amount.get(),
+        ) {
+            Ok(e) => e,
+            Err(msg) => {
+                error.set(Some(msg));
+                return;
+            }
+        };
+        let record = Record::new(RecordPayload::JournalEntry(entry));
+        let id = Uuid::new_v4();
+        let rtype = record.record_type();
+        // DK で seal (同期。StoredValue 借用は await をまたがない)。
+        let ct = match session
+            .with_value(|s| s.as_ref().map(|sess| seal_record(&sess.dk, id, 1, &record)))
+        {
+            Some(Ok(c)) => c,
+            Some(Err(e)) => {
+                error.set(Some(format!("暗号化に失敗しました: {e}")));
+                return;
+            }
+            None => return,
+        };
+        let Some(client) = session.with_value(|s| s.as_ref().map(|s| s.client.clone())) else {
+            return;
+        };
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let push = PushRequest {
+                changes: vec![PushChange {
+                    record_id: id,
+                    record_type: rtype,
+                    expected_version: 0,
+                    tombstone: false,
+                    ciphertext: Some(ct),
+                }],
+            };
+            match client.push(&push).await {
+                Ok(_) => {
+                    desc.set(String::new());
+                    amount.set(String::new());
+                    debit.set(String::new());
+                    credit.set(String::new());
+                    // サーバーから再読込 (pull+decrypt 経路で一覧へ反映)。
+                    load();
+                }
+                Err(e) => error.set(Some(format!("保存に失敗しました: {e}"))),
+            }
+            busy.set(false);
+        });
+    };
+
+    view! {
+        <div class="ledger-view">
+            <h3>"仕訳入力"</h3>
+            {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
+            <form on:submit=on_add>
+                <label>
+                    "日付"
+                    <input
+                        data-testid="je-date"
+                        type="text"
+                        placeholder="2026-06-08"
+                        prop:value=move || date.get()
+                        on:input=move |ev| date.set(event_target_value(&ev))
+                        required
+                    />
+                </label>
+                <label>
+                    "摘要"
+                    <input
+                        data-testid="je-desc"
+                        type="text"
+                        prop:value=move || desc.get()
+                        on:input=move |ev| desc.set(event_target_value(&ev))
+                        required
+                    />
+                </label>
+                <label>
+                    "借方科目"
+                    <input
+                        data-testid="je-debit"
+                        type="text"
+                        placeholder="5010"
+                        prop:value=move || debit.get()
+                        on:input=move |ev| debit.set(event_target_value(&ev))
+                        required
+                    />
+                </label>
+                <label>
+                    "貸方科目"
+                    <input
+                        data-testid="je-credit"
+                        type="text"
+                        placeholder="1010"
+                        prop:value=move || credit.get()
+                        on:input=move |ev| credit.set(event_target_value(&ev))
+                        required
+                    />
+                </label>
+                <label>
+                    "金額(円)"
+                    <input
+                        data-testid="je-amount"
+                        type="text"
+                        inputmode="numeric"
+                        prop:value=move || amount.get()
+                        on:input=move |ev| amount.set(event_target_value(&ev))
+                        required
+                    />
+                </label>
+                <button type="submit" data-testid="je-submit" prop:disabled=move || busy.get()>
+                    {move || if busy.get() { "保存中…" } else { "追加" }}
+                </button>
+            </form>
+
+            <h3>"仕訳一覧"</h3>
+            <button data-testid="reload" on:click=move |_| load()>
+                "再読込"
+            </button>
+            <table data-testid="entries">
+                <thead>
+                    <tr>
+                        <th>"日付"</th>
+                        <th>"摘要"</th>
+                        <th>"金額"</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <For
+                        each=move || entries.get()
+                        key=|(id, _)| *id
+                        children=move |(_id, e)| {
+                            let total = entry_total(&e);
+                            view! {
+                                <tr>
+                                    <td>
+                                        {format!(
+                                            "{:04}-{:02}-{:02}",
+                                            e.date.year(),
+                                            e.date.month(),
+                                            e.date.day(),
+                                        )}
+                                    </td>
+                                    <td class="desc">{e.description.clone()}</td>
+                                    <td class="amount">{total.to_string()}</td>
+                                </tr>
+                            }
+                        }
+                    />
+                </tbody>
+            </table>
+        </div>
     }
 }
