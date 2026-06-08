@@ -72,8 +72,7 @@ fn verify_body(email: &str, auth_key: Vec<u8>) -> Value {
     .unwrap()
 }
 
-/// プロビジョニング URI から現在時刻の TOTP コードを作る (authenticator アプリの代用)。
-fn code_from_uri(uri: &str) -> String {
+fn secret_from_uri(uri: &str) -> TotpSecret {
     let b32 = uri
         .split("secret=")
         .nth(1)
@@ -81,8 +80,35 @@ fn code_from_uri(uri: &str) -> String {
         .split('&')
         .next()
         .unwrap();
-    let secret = TotpSecret::from_base32(b32).unwrap();
-    secret.code_at(Utc::now().timestamp() as u64).unwrap()
+    TotpSecret::from_base32(b32).unwrap()
+}
+
+/// 現在時刻の TOTP コード (authenticator アプリの代用)。
+fn code_from_uri(uri: &str) -> String {
+    secret_from_uri(uri)
+        .code_at(Utc::now().timestamp() as u64)
+        .unwrap()
+}
+
+/// 指定 unix 時刻の TOTP コード (2FA は confirm と別 step を使うため)。
+fn code_from_uri_at(uri: &str, unix_time: u64) -> String {
+    secret_from_uri(uri).code_at(unix_time).unwrap()
+}
+
+/// signup → confirm → login/verify まで進め、(provisioning URI, login_token) を返す。
+async fn register_and_login(app: &Router) -> (String, String) {
+    let email = unique_email();
+    let auth_key = vec![7u8; 32];
+    let (_, body) = call(app, "/auth/signup", &signup_body(&email, auth_key.clone())).await;
+    let uri = body["totp_provisioning_uri"].as_str().unwrap().to_string();
+    call(
+        app,
+        "/auth/totp/confirm",
+        &json!({ "email": email, "code": code_from_uri(&uri) }),
+    )
+    .await;
+    let (_, lv) = call(app, "/auth/login/verify", &verify_body(&email, auth_key)).await;
+    (uri, lv["login_token"].as_str().unwrap().to_string())
 }
 
 #[tokio::test]
@@ -157,11 +183,57 @@ async fn full_signup_confirm_login_flow() {
     assert!(!lv["login_token"].as_str().unwrap().is_empty());
     assert_eq!(lv["factors"][0], "totp");
 
+    // 2FA: confirm と同窓だと replay 拒否されるため次 step のコードで検証 → session + blob。
+    let login_token = lv["login_token"].as_str().unwrap().to_string();
+    let next = Utc::now().timestamp() as u64 + 30;
+    let (s, sess) = call(
+        &app,
+        "/auth/2fa/totp",
+        &json!({ "login_token": login_token, "code": code_from_uri_at(&uri, next) }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!sess["session_token"].as_str().unwrap().is_empty());
+    // blob は 2FA 通過後にのみ返る (signup で保存した値)
+    assert_eq!(
+        STANDARD.decode(sess["mk_pw"].as_str().unwrap()).unwrap(),
+        vec![10, 11]
+    );
+    assert_eq!(
+        STANDARD.decode(sess["dk_wrap"].as_str().unwrap()).unwrap(),
+        vec![14, 15]
+    );
+    assert_eq!(sess["sync_cursor"], 0);
+
     // 誤 authKey → 401
     let (s, _) = call(
         &app,
         "/auth/login/verify",
         &verify_body(&email, vec![8u8; 32]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn totp_2fa_rejects_wrong_code_and_invalid_token() {
+    let app = test_app().await;
+    let (_uri, login_token) = register_and_login(&app).await;
+
+    // 誤コード → 401 (失敗回数を消費)
+    let (s, _) = call(
+        &app,
+        "/auth/2fa/totp",
+        &json!({ "login_token": login_token, "code": "000" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // 存在しない login_token → 401
+    let (s, _) = call(
+        &app,
+        "/auth/2fa/totp",
+        &json!({ "login_token": "nonexistent-token", "code": "123456" }),
     )
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
