@@ -74,11 +74,28 @@ jobs:
       - name: Build domain (serde/records) for wasm
         run: cargo build --target wasm32-unknown-unknown -p iikanji-domain --features serde
 
-  # E2E: Trunk で SPA をビルド→静的配信し、Playwright (Firefox) で実ブラウザ検証する。
+  # E2E: SPA を Trunk でビルド→静的配信し、実 Axum+Postgres サーバーへプロキシして
+  # Playwright (Firefox) で E2EE ceremony を実ブラウザ検証する。
   # tests/e2e/*.spec.* が無い間は scaffold (green) のまま。
   e2e:
     name: e2e
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: iikanji_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # playwright.config.ts の server webServer が読む。Postgres service へ接続。
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/iikanji_test
     steps:
       - uses: actions/checkout@v5
       - name: Detect E2E specs
@@ -104,6 +121,9 @@ jobs:
       - name: Build SPA (trunk --release)
         if: steps.detect.outputs.have_specs == 'true'
         run: trunk build --release
+      - name: Build API server
+        if: steps.detect.outputs.have_specs == 'true'
+        run: cargo build -p iikanji-server
       - name: Setup Node
         if: steps.detect.outputs.have_specs == 'true'
         uses: actions/setup-node@v4
@@ -112,6 +132,7 @@ jobs:
           cache: npm
       - name: Run Playwright E2E
         if: steps.detect.outputs.have_specs == 'true'
+        # playwright.config.ts の webServer が Rust サーバー + 静的/プロキシサーバーを起動する。
         run: |
           npm ci --include=dev
           npx playwright install --with-deps firefox
