@@ -56,4 +56,10 @@ test('create a journal entry and see it persisted via E2EE sync', async ({ page 
   // 明示的な再読込でも pull+open 経路で残ること (= サーバー側の暗号化永続を確認)。
   await page.getByTestId('reload').click();
   await expect(table).toContainText(memo);
+
+  // 収支サマリー (domain income_expense_summary) が復号済み仕訳から算出される。
+  // 食費(5010)借方 1280 / 現金(1010)貸方 → 支出 1280・収支 -1280。
+  await expect(page.getByTestId('sum-expense')).toHaveText('1280');
+  await expect(page.getByTestId('sum-balance')).toHaveText('-1280');
+  await expect(page.getByTestId('sum-income')).toHaveText('0');
 });

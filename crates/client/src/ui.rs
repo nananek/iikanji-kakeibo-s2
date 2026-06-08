@@ -18,7 +18,10 @@ use crate::api::Client;
 use crate::crypto_glue::{build_signup, derive_login, unlock_data_key, LoginKeys};
 use crate::records::{open_record, seal_record};
 use iikanji_crypto::DataKey;
-use iikanji_domain::{AccountCode, Date, EntryLine, JournalEntry, Record, RecordPayload, Yen};
+use iikanji_domain::{
+    income_expense_summary, AccountCode, Chart, Date, EntryLine, JournalEntry, Record,
+    RecordPayload, Yen,
+};
 use iikanji_types::auth::{
     LoginBeginRequest, LoginVerifyRequest, TotpConfirmRequest, TotpVerifyRequest,
 };
@@ -597,6 +600,33 @@ pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
 
     view! {
         <div class="ledger-view">
+            <section class="summary" data-testid="summary">
+                <h3>"収支サマリー"</h3>
+                {move || {
+                    let v = entries.get();
+                    let s = income_expense_summary(v.iter().map(|(_, e)| e), &Chart::standard());
+                    view! {
+                        <ul class="summary-list">
+                            <li>
+                                "収入 "
+                                <span data-testid="sum-income">{s.income.to_string()}</span>
+                                " 円"
+                            </li>
+                            <li>
+                                "支出 "
+                                <span data-testid="sum-expense">{s.expense.to_string()}</span>
+                                " 円"
+                            </li>
+                            <li>
+                                "収支 "
+                                <span data-testid="sum-balance">{s.balance.to_string()}</span>
+                                " 円"
+                            </li>
+                        </ul>
+                    }
+                }}
+            </section>
+
             <h3>"仕訳入力"</h3>
             {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
             <form on:submit=on_add>
