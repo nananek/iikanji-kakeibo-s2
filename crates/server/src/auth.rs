@@ -431,6 +431,10 @@ pub async fn passkey_register_begin(
     State(st): State<AppState>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<CreationChallengeResponse>, AppError> {
+    // 期限切れの登録途中状態を掃除する (opportunistic GC — abandoned ceremony の蓄積を防ぐ)。
+    sqlx::query("DELETE FROM webauthn_reg_states WHERE expires_at < now()")
+        .execute(&st.pool)
+        .await?;
     let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_one(&st.pool)
@@ -545,6 +549,10 @@ pub async fn passkey_auth_begin(
     Json(req): Json<PasskeyAuthBeginRequest>,
 ) -> Result<Json<RequestChallengeResponse>, AppError> {
     let token_hash = hash_token(req.login_token.as_bytes()).to_vec();
+    // 期限切れの認証途中状態を掃除する (opportunistic GC — abandoned ceremony の蓄積を防ぐ)。
+    sqlx::query("DELETE FROM webauthn_auth_states WHERE expires_at < now()")
+        .execute(&st.pool)
+        .await?;
     let mut tx = st.pool.begin().await?;
     let row = sqlx::query(
         "SELECT user_id, expires_at, failed_attempts FROM pending_logins WHERE token_hash = $1",

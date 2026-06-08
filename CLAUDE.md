@@ -55,6 +55,14 @@ signup 時のラップ blob: mk-pw(wrapKey) / mk-recovery(recoveryKey) / dk-wrap
 `chacha20poly1305`(**XChaCha20-Poly1305**) / `hkdf`(HKDF-SHA-256, info でドメイン分離) / `sha2` / `getrandom`(OsRng) /
 `totp-rs` / `webauthn-rs`(server) / `subtle` / `zeroize`。
 
+> **例外: WebAuthn の `webauthn-rs`（OpenSSL vendored）**。`webauthn-rs`(0.5) は内部で OpenSSL に依存し
+> RustCrypto 統一方針から外れる（`server` で `openssl = { vendored }` を静的リンク）。許容する理由:
+> ① passkey は **E2EE 鍵ツリー（PMK/MK/DK）には一切関与せず**、第2要素のセッション gate のみ
+> （CLAUDE.md invariant 3）。OpenSSL は attestation/assertion 検証にのみ使われ、財務 blob の暗号には
+> 一切触れない。② WebAuthn の COSE/attestation 検証を自前実装するより、実績ある `webauthn-rs` を使う方が安全。
+> OpenSSL の脆弱性追跡は `Cargo.lock` の `openssl-src` bump で行う。将来 `passkey-rs` 等の純 Rust 実装が
+> 成熟すれば移行を検討する。**鍵ツリーの暗号は引き続き RustCrypto のみ（この例外を拡大しない）**。
+
 **Envelope v1**（binary, 版管理）: `magic("K1")|version|alg|kdf_id|flags|nonce(24)|ciphertext(+16B tag)`。
 AAD = ヘッダ(30B) + 呼び出し側 context(`purpose + record_id + version`)。**AAD は envelope に格納せず open 時に文脈から再構築**するため、blob すり替え（用途取り違え）は復号失敗として必ず検出される。version/alg/kdf_id バイトで将来の鍵ローテ・アルゴリズム更新に備える。実装は `crates/crypto/`（`iikanji-crypto`）。
 
