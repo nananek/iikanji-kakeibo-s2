@@ -69,6 +69,8 @@ impl Record {
 pub enum RecordError {
     Encode,
     Decode,
+    /// 既知より新しいスキーマ版 (このクライアントでは解釈不可)。
+    UnsupportedVersion,
 }
 
 /// レコードを CBOR バイト列へ符号化する (暗号化前の平文)。
@@ -78,9 +80,13 @@ pub fn encode(record: &Record) -> Result<Vec<u8>, RecordError> {
     Ok(buf)
 }
 
-/// CBOR バイト列をレコードへ復号する。
+/// CBOR バイト列をレコードへ復号する。既知より新しい `v` は `UnsupportedVersion`。
 pub fn decode(bytes: &[u8]) -> Result<Record, RecordError> {
-    ciborium::from_reader(bytes).map_err(|_| RecordError::Decode)
+    let record: Record = ciborium::from_reader(bytes).map_err(|_| RecordError::Decode)?;
+    if record.v > RECORD_SCHEMA_VERSION {
+        return Err(RecordError::UnsupportedVersion);
+    }
+    Ok(record)
 }
 
 #[cfg(test)]
@@ -146,5 +152,16 @@ mod tests {
     #[test]
     fn decode_garbage_errors() {
         assert_eq!(decode(&[0xff, 0xff, 0x01, 0x02]), Err(RecordError::Decode));
+    }
+
+    #[test]
+    fn decode_rejects_future_version() {
+        // 将来版 (v=2) のレコードを符号化 → 既知 (v=1) クライアントは UnsupportedVersion。
+        let future = Record {
+            v: RECORD_SCHEMA_VERSION + 1,
+            payload: RecordPayload::FiscalClose(FiscalClose::new(2026)),
+        };
+        let bytes = encode(&future).unwrap();
+        assert_eq!(decode(&bytes), Err(RecordError::UnsupportedVersion));
     }
 }
