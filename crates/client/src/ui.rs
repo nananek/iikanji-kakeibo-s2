@@ -19,7 +19,7 @@ use crate::crypto_glue::{build_signup, derive_login, unlock_data_key, LoginKeys}
 use crate::records::{open_record, seal_record};
 use iikanji_crypto::DataKey;
 use iikanji_domain::{
-    income_expense_summary, AccountCode, Chart, Date, EntryLine, JournalEntry, Record,
+    income_expense_summary, AccountCode, AccountInfo, Chart, Date, EntryLine, JournalEntry, Record,
     RecordPayload, Yen,
 };
 use iikanji_types::auth::{
@@ -517,6 +517,23 @@ pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
     let credit = RwSignal::new(String::new());
     let amount = RwSignal::new(String::new());
 
+    // 標準科目カタログは一度だけ構築し、集計・科目ドロップダウン・名称解決で再利用する。
+    let chart = StoredValue::new(Chart::standard());
+    // ドロップダウン用 (code, "code 名称")。display_order 順。
+    let account_opts: Vec<(String, String)> = chart.with_value(|c| {
+        let mut accts: Vec<&AccountInfo> = c.iter().filter(|a| a.is_active).collect();
+        accts.sort_by_key(|a| a.display_order);
+        accts
+            .into_iter()
+            .map(|a| {
+                (
+                    a.code.as_str().to_string(),
+                    format!("{} {}", a.code.as_str(), a.name),
+                )
+            })
+            .collect()
+    });
+
     // サーバーから全レコードを pull → DK で復号 → 一覧へ反映。
     let load = move || {
         let Some(client) = session.with_value(|s| s.as_ref().map(|s| s.client.clone())) else {
@@ -604,7 +621,7 @@ pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
                 <h3>"収支サマリー"</h3>
                 {move || {
                     let v = entries.get();
-                    let s = income_expense_summary(v.iter().map(|(_, e)| e), &Chart::standard());
+                    let s = chart.with_value(|c| income_expense_summary(v.iter().map(|(_, e)| e), c));
                     view! {
                         <ul class="summary-list">
                             <li>
@@ -653,25 +670,37 @@ pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
                 </label>
                 <label>
                     "借方科目"
-                    <input
+                    <select
                         data-testid="je-debit"
-                        type="text"
-                        placeholder="5010"
                         prop:value=move || debit.get()
-                        on:input=move |ev| debit.set(event_target_value(&ev))
+                        on:change=move |ev| debit.set(event_target_value(&ev))
                         required
-                    />
+                    >
+                        <option value="">"-- 借方科目 --"</option>
+                        {account_opts
+                            .iter()
+                            .map(|(code, label)| {
+                                view! { <option value=code.clone()>{label.clone()}</option> }
+                            })
+                            .collect::<Vec<_>>()}
+                    </select>
                 </label>
                 <label>
                     "貸方科目"
-                    <input
+                    <select
                         data-testid="je-credit"
-                        type="text"
-                        placeholder="1010"
                         prop:value=move || credit.get()
-                        on:input=move |ev| credit.set(event_target_value(&ev))
+                        on:change=move |ev| credit.set(event_target_value(&ev))
                         required
-                    />
+                    >
+                        <option value="">"-- 貸方科目 --"</option>
+                        {account_opts
+                            .iter()
+                            .map(|(code, label)| {
+                                view! { <option value=code.clone()>{label.clone()}</option> }
+                            })
+                            .collect::<Vec<_>>()}
+                    </select>
                 </label>
                 <label>
                     "金額(円)"
@@ -698,6 +727,8 @@ pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
                     <tr>
                         <th>"日付"</th>
                         <th>"摘要"</th>
+                        <th>"借方"</th>
+                        <th>"貸方"</th>
                         <th>"金額"</th>
                     </tr>
                 </thead>
@@ -707,6 +738,23 @@ pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
                         key=|(id, _)| *id
                         children=move |(_id, e)| {
                             let total = e.total_debit();
+                            let name = |code: Option<&AccountCode>| match code {
+                                Some(c) => {
+                                    chart
+                                        .with_value(|ch| {
+                                            ch.get(c)
+                                                .map(|a| a.name.clone())
+                                                .unwrap_or_else(|| c.as_str().to_string())
+                                        })
+                                }
+                                None => String::new(),
+                            };
+                            let debit_acct = name(
+                                e.lines.iter().find(|l| l.debit.is_positive()).map(|l| &l.account),
+                            );
+                            let credit_acct = name(
+                                e.lines.iter().find(|l| l.credit.is_positive()).map(|l| &l.account),
+                            );
                             view! {
                                 <tr>
                                     <td>
@@ -718,6 +766,8 @@ pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
                                         )}
                                     </td>
                                     <td class="desc">{e.description.clone()}</td>
+                                    <td class="debit-acct">{debit_acct}</td>
+                                    <td class="credit-acct">{credit_acct}</td>
                                     <td class="amount">{total.to_string()}</td>
                                 </tr>
                             }
