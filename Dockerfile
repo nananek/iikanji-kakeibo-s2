@@ -3,11 +3,14 @@
 # 単一イメージ: iikanji-server が API と SPA(Trunk dist) を同一オリジンで配信する。
 # ビルドは SPA(wasm) と server(native) を 1 つの builder で行い、slim runtime へ成果物を移す。
 #
-# 実行時の環境変数:
-#   DATABASE_URL  (必須) postgres://...   起動時に migration を適用する
-#   SERVER_SECRET (本番必須) ダミー salt / TOTP at-rest 鍵の素。未設定は dev 既定値 + warn
-#   BIND_ADDR     (既定 0.0.0.0:8080)
-#   STATIC_DIR    (既定 /app/dist) SPA 配信元
+# 実行時の環境変数 (詳細は docs/DEPLOY.md):
+#   DATABASE_URL    (必須) postgres://...   起動時に migration を適用する
+#   SERVER_SECRET   (本番必須) ダミー salt / TOTP at-rest 鍵の素。未設定は dev 既定値 + warn
+#   BIND_ADDR       (既定 0.0.0.0:8080)
+#   STATIC_DIR      (既定 /app/dist) SPA 配信元
+#   WEBAUTHN_RP_ID  (既定 localhost) passkey の RP ID = 配信ドメイン。本番は実ホスト名
+#   WEBAUTHN_ORIGIN (既定 http://localhost:8080) passkey の origin。本番は https 必須
+#                   (localhost 以外で http だと起動失敗。設定し忘れると本番で passkey が機能しない)
 
 ############################  builder  ############################
 FROM rust:1.96-bookworm AS builder
