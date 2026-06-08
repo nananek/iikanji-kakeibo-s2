@@ -18,15 +18,16 @@ impl Config {
     pub fn from_env() -> anyhow::Result<Config> {
         let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
         let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-        let server_secret = match std::env::var("SERVER_SECRET") {
-            Ok(s) => s.into_bytes(),
-            Err(_) => {
-                tracing::warn!(
-                    "SERVER_SECRET 未設定: 開発用の既定値を使用します。本番では必ず設定してください"
-                );
-                DEV_SECRET.to_vec()
-            }
-        };
+        let server_secret = std::env::var("SERVER_SECRET")
+            .map(String::into_bytes)
+            .unwrap_or_else(|_| DEV_SECRET.to_vec());
+        // 未設定 / 既定 / プレースホルダ ("change-me...") の弱い値を検出して警告 (本番事故防止)。
+        if server_secret == DEV_SECRET || server_secret.starts_with(b"change-me") {
+            tracing::warn!(
+                "SERVER_SECRET が未設定または既定/プレースホルダ値です。\
+                 本番では固有のランダム値 (例: openssl rand -hex 32) を設定してください"
+            );
+        }
         let static_dir = std::env::var("STATIC_DIR").ok().filter(|s| !s.is_empty());
         Ok(Config {
             database_url,

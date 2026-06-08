@@ -22,19 +22,21 @@ fn inline_script_sha256(index_html: &str) -> Option<String> {
 /// SPA 配信時のセキュリティヘッダ。CSP は inline 起動 script を hash 許可し、wasm を
 /// `'wasm-unsafe-eval'`、Web Worker(Blob) を `worker-src blob:` で許可する。
 /// COOP/COEP で cross-origin isolation を有効化する (将来の Argon2 p>1 = SharedArrayBuffer 前提)。
-fn build_csp(index_html: &str) -> String {
-    let script_src = match inline_script_sha256(index_html) {
-        Some(h) => format!("'self' 'wasm-unsafe-eval' 'sha256-{h}'"),
-        None => {
-            tracing::warn!("index.html の inline script hash を導出できず CSP を緩めます");
-            "'self' 'wasm-unsafe-eval' 'unsafe-inline'".to_string()
-        }
-    };
-    format!(
-        "default-src 'self'; script-src {script_src}; worker-src 'self' blob:; \
-         connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; \
-         object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
-    )
+///
+/// inline script hash を導出できない場合は **起動失敗** (fail-closed)。`'unsafe-inline'` への
+/// サイレント劣化はしない — CSP は XSS でのクライアント鍵漏洩を防ぐ最後の砦のため。
+fn build_csp(index_html: &str) -> Result<String> {
+    let hash = inline_script_sha256(index_html).ok_or_else(|| {
+        anyhow::anyhow!(
+            "index.html の inline 起動 script の hash を導出できません。Trunk ビルド出力を確認してください"
+        )
+    })?;
+    Ok(format!(
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-{hash}'; \
+         worker-src 'self' blob:; connect-src 'self'; img-src 'self' data:; \
+         style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; \
+         form-action 'self'; frame-ancestors 'none'"
+    ))
 }
 
 #[tokio::main]
@@ -55,7 +57,7 @@ async fn main() -> Result<()> {
         let index = Path::new(dir).join("index.html");
         let index_html = std::fs::read_to_string(&index)
             .map_err(|e| anyhow::anyhow!("STATIC_DIR の index.html を読めません: {e}"))?;
-        let csp = HeaderValue::from_str(&build_csp(&index_html))?;
+        let csp = HeaderValue::from_str(&build_csp(&index_html)?)?;
         app = app
             .fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)))
             // セキュリティヘッダ (全レスポンスに付与)。
