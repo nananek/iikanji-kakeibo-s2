@@ -13,3 +13,9 @@ iikanji-domain = { path = "../domain", features = ["serde"] }
 iikanji-types = { path = "../types" }
 uuid = { workspace = true }
 zeroize = { workspace = true }
+
+# Leptos UI は wasm32 限定 (native の server lane へ Leptos を持ち込まない)。
+# crypto crate の getrandom js と同じ target-gate パターン。
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+leptos = { workspace = true }
+console_error_panic_hook = { workspace = true }

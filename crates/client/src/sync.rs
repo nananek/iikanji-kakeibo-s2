@@ -78,8 +78,12 @@ mod tests {
 
     #[test]
     fn resolve_fiscal_is_monotonic_and_commutative() {
+        // 単調: より大きい closed_period を採用 (引数順に依らず)。
         assert_eq!(closed_of(&resolve(&fiscal(2026, 3), &fiscal(2026, 6))), 6);
         assert_eq!(closed_of(&resolve(&fiscal(2026, 8), &fiscal(2026, 5))), 8);
+        // 可換: resolve(a, b) == resolve(b, a)。
+        let (a, b) = (fiscal(2026, 3), fiscal(2026, 6));
+        assert_eq!(resolve(&a, &b), resolve(&b, &a));
     }
 
     #[test]

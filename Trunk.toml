@@ -1,0 +1,9 @@
+# Trunk 設定 (純 CSR SPA, v1)。entry は repo 直下の index.html、本体は crates/client。
+# SSR が必要になれば後日 cargo-leptos へ移行する (CLAUDE.md)。
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+# Playwright e2e / ローカル開発で使用するポート。
+port = 8080

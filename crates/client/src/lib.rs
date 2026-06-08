@@ -13,6 +13,13 @@ mod crypto_glue;
 mod records;
 mod sync;
 
+// Leptos UI シェルは wasm32 限定 (native ビルドには Leptos を持ち込まない)。
+#[cfg(target_arch = "wasm32")]
+mod app;
+
 pub use crypto_glue::{build_signup, derive_login, unlock_data_key, LoginKeys, SignupOutput};
 pub use records::{open_record, seal_record, RecordCryptoError};
 pub use sync::{reconcile, resolve, RemoteRecord};
+
+#[cfg(target_arch = "wasm32")]
+pub use app::App;
