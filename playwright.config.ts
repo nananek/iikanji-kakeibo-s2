@@ -1,19 +1,17 @@
 import { defineConfig, devices } from '@playwright/test';
 
-// E2E 構成: Trunk dist/ を静的配信 (+ API を Rust サーバーへプロキシ) し、実ブラウザ +
-// 実サーバー (Axum + Postgres) で検証する。dist/ は事前に `trunk build --release` で生成、
-// サーバーバイナリは `cargo build -p iikanji-server` で生成しておく (CI のステップ参照)。
+// E2E は本番と同じ**単一 server** (iikanji-server が API + SPA を同一オリジン配信 + セキュリティ
+// ヘッダ付与) を相手にする。server バイナリは `cargo build -p iikanji-server`、dist は
+// `trunk build --release` で事前生成しておく (CI のステップ参照)。Postgres も別途用意。
 const PORT = 8080;
-const SERVER_PORT = 3000;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
-const BACKEND_URL = `http://127.0.0.1:${SERVER_PORT}`;
 
 export default defineConfig({
   testDir: './tests/e2e',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  // Argon2id (release wasm) + 実ブラウザのため既定 30s より少し緩める。
+  // Argon2id (release wasm, Web Worker) + 実ブラウザのため既定 30s より緩める。
   timeout: 60_000,
   reporter: process.env.CI ? 'github' : 'list',
   use: {
@@ -21,31 +19,17 @@ export default defineConfig({
     trace: 'on-first-retry',
   },
   projects: [{ name: 'firefox', use: { ...devices['Desktop Firefox'] } }],
-  webServer: [
-    {
-      // Rust API サーバー。Postgres は別途用意 (CI: service container、ローカル: docker)。
-      // ローカルは既に起動済みのサーバーを再利用する (reuseExistingServer)。
-      command: './target/debug/iikanji-server',
-      url: `${BACKEND_URL}/health`,
-      reuseExistingServer: !process.env.CI,
-      timeout: 60_000,
-      env: {
-        DATABASE_URL:
-          process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/iikanji_test',
-        BIND_ADDR: `127.0.0.1:${SERVER_PORT}`,
-      },
+  webServer: {
+    command: './target/debug/iikanji-server',
+    url: `${BASE_URL}/health`,
+    reuseExistingServer: !process.env.CI,
+    timeout: 60_000,
+    env: {
+      DATABASE_URL:
+        process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/iikanji_test',
+      BIND_ADDR: `127.0.0.1:${PORT}`,
+      STATIC_DIR: 'dist',
+      SERVER_SECRET: 'e2e-not-a-real-secret',
     },
-    {
-      // dist/ を静的配信し /auth,/sync,/health を Rust サーバーへプロキシ (同一オリジン化)。
-      command: 'node tools/e2e-server.mjs',
-      url: BASE_URL,
-      reuseExistingServer: !process.env.CI,
-      timeout: 60_000,
-      env: {
-        E2E_PORT: String(PORT),
-        E2E_BACKEND: BACKEND_URL,
-        E2E_DIST: 'dist',
-      },
-    },
-  ],
+  },
 });
