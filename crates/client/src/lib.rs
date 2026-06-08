@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod api;
 mod crypto_glue;
 mod records;
 mod sync;
@@ -17,9 +18,12 @@ mod sync;
 #[cfg(target_arch = "wasm32")]
 mod app;
 
+pub use api::{ApiError, ApiRequest, Method};
 pub use crypto_glue::{build_signup, derive_login, unlock_data_key, LoginKeys, SignupOutput};
 pub use records::{open_record, seal_record, RecordCryptoError};
 pub use sync::{reconcile, resolve, RemoteRecord};
 
+#[cfg(target_arch = "wasm32")]
+pub use api::Client;
 #[cfg(target_arch = "wasm32")]
 pub use app::App;

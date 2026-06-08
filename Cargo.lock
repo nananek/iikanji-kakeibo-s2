@@ -1189,10 +1189,13 @@ name = "iikanji-client"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "gloo-net",
  "iikanji-crypto",
  "iikanji-domain",
  "iikanji-types",
  "leptos",
+ "serde",
+ "serde_json",
  "uuid",
  "zeroize",
 ]
