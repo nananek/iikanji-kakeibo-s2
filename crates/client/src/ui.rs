@@ -501,11 +501,6 @@ fn decode_entries(session: &Option<Session>, records: &[EncRecord]) -> Vec<(Uuid
         .collect()
 }
 
-/// 仕訳の借方合計 (= 貸方合計)。一覧の金額表示用。
-fn entry_total(entry: &JournalEntry) -> Yen {
-    entry.lines.iter().map(|l| l.debit).sum()
-}
-
 /// 仕訳入力フォーム + 一覧。DK で seal/open し、API で push/pull する E2EE 同期ループ。
 #[component]
 pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
@@ -586,6 +581,7 @@ pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
             };
             match client.push(&push).await {
                 Ok(_) => {
+                    date.set(String::new());
                     desc.set(String::new());
                     amount.set(String::new());
                     debit.set(String::new());
@@ -680,7 +676,7 @@ pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
                         each=move || entries.get()
                         key=|(id, _)| *id
                         children=move |(_id, e)| {
-                            let total = entry_total(&e);
+                            let total = e.total_debit();
                             view! {
                                 <tr>
                                     <td>
