@@ -101,14 +101,14 @@ async fn full_signup_confirm_login_flow() {
     let (s, _) = call(&app, "/auth/signup", &signup_body(&email, auth_key.clone())).await;
     assert_eq!(s, StatusCode::CONFLICT);
 
-    // TOTP 確認前は login 不可 (パスワードが正しくても 403)
+    // TOTP 確認前は login 不可。パスワードが正しくても 401 に統一 (正否を漏らさない)。
     let (s, _) = call(
         &app,
         "/auth/login/verify",
         &verify_body(&email, auth_key.clone()),
     )
     .await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 
     // 誤コード (長さ不正) で confirm → 401
     let (s, _) = call(

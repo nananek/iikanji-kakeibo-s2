@@ -115,12 +115,15 @@ pub async fn totp_confirm(
     State(st): State<AppState>,
     Json(req): Json<TotpConfirmRequest>,
 ) -> Result<StatusCode, AppError> {
+    // 行ロックを取って SELECT→検証→UPDATE を 1 tx で行い、並行 confirm の TOCTOU を防ぐ。
+    let mut tx = st.pool.begin().await?;
     let row = sqlx::query(
         "SELECT u.id, u.status, t.secret_enc, t.last_used_step \
-         FROM users u JOIN totp_secrets t ON t.user_id = u.id WHERE u.email = $1",
+         FROM users u JOIN totp_secrets t ON t.user_id = u.id \
+         WHERE u.email = $1 FOR UPDATE OF u, t",
     )
     .bind(&req.email)
-    .fetch_optional(&st.pool)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or(AppError::Unauthorized)?;
 
@@ -131,13 +134,15 @@ pub async fn totp_confirm(
     let secret_enc: Vec<u8> = row.get("secret_enc");
     let last_used_step: Option<i64> = row.get("last_used_step");
 
-    let secret_bytes = open_at_rest(&st.totp_key, &totp_context(user_id), &secret_enc)?;
-    let secret = TotpSecret::from_bytes(secret_bytes);
+    let secret = TotpSecret::from_bytes(open_at_rest(
+        &st.totp_key,
+        &totp_context(user_id),
+        &secret_enc,
+    )?);
     let step = secret
         .verify(&req.code, now_unix(), last_used_step.map(|s| s as u64))?
         .ok_or(AppError::Unauthorized)?;
 
-    let mut tx = st.pool.begin().await?;
     sqlx::query("UPDATE totp_secrets SET enabled = true, last_used_step = $2 WHERE user_id = $1")
         .bind(user_id)
         .bind(step as i64)
@@ -185,13 +190,14 @@ pub async fn login_verify(
     let user_id = match row {
         Some(r) => {
             let hash: String = r.get("auth_hash");
-            if !verify_auth_key(&auth_key, &hash).unwrap_or(false) {
-                None
-            } else if r.get::<String, _>("status") != "active" {
-                // パスワードは正しいが TOTP 未確定 (= アカウント所有者)。
-                return Err(AppError::Forbidden("complete TOTP setup before login"));
-            } else {
+            // パスワード正 かつ active のときのみ成功。未確定/非 active も 401 に統一し、
+            // status code からパスワードの正否が漏れないようにする (enumeration 対策)。
+            if verify_auth_key(&auth_key, &hash).unwrap_or(false)
+                && r.get::<String, _>("status") == "active"
+            {
                 Some(r.get::<Uuid, _>("id"))
+            } else {
+                None
             }
         }
         None => {
