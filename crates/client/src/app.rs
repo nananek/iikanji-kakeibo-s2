@@ -8,16 +8,43 @@
 
 use leptos::prelude::*;
 
-use crate::ui::SignupForm;
+use crate::ui::{LoginForm, SignupForm};
 
-/// ルートコンポーネント。アプリシェル + 認証 UI (現状は signup ceremony)。
+/// 認証 UI のモード。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuthMode {
+    Signup,
+    Login,
+}
+
+/// ルートコンポーネント。アプリシェル + 認証 UI (signup / login)。
 #[component]
 pub fn App() -> impl IntoView {
+    let mode = RwSignal::new(AuthMode::Signup);
     view! {
         <main class="app-shell">
             <h1>"いいかんじ™家計簿"</h1>
             <p class="tagline">"E2EE 複式簿記の家計簿"</p>
-            <SignupForm />
+            <nav class="auth-tabs">
+                <button
+                    data-testid="tab-signup"
+                    class:active=move || mode.get() == AuthMode::Signup
+                    on:click=move |_| mode.set(AuthMode::Signup)
+                >
+                    "アカウント作成"
+                </button>
+                <button
+                    data-testid="tab-login"
+                    class:active=move || mode.get() == AuthMode::Login
+                    on:click=move |_| mode.set(AuthMode::Login)
+                >
+                    "ログイン"
+                </button>
+            </nav>
+            {move || match mode.get() {
+                AuthMode::Signup => view! { <SignupForm /> }.into_any(),
+                AuthMode::Login => view! { <LoginForm /> }.into_any(),
+            }}
         </main>
     }
 }
