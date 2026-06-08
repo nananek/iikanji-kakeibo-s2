@@ -294,10 +294,7 @@ pub async fn totp_2fa(
 
     // 期限切れ / 試行超過 → トークンを破棄して拒否。
     if expires_at < Utc::now() || attempts >= MAX_2FA_ATTEMPTS {
-        sqlx::query("DELETE FROM pending_logins WHERE token_hash = $1")
-            .bind(&token_hash)
-            .execute(&mut *tx)
-            .await?;
+        consume_login_token(&mut tx, &token_hash).await?;
         tx.commit().await?;
         return Err(AppError::Unauthorized);
     }
@@ -339,15 +336,30 @@ pub async fn totp_2fa(
         .bind(step as i64)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM pending_logins WHERE token_hash = $1")
-        .bind(&token_hash)
-        .execute(&mut *tx)
-        .await?;
+    consume_login_token(&mut tx, &token_hash).await?;
 
     // 2FA 通過後にのみ セッション + MK/DK ラップ blob を発行する (passkey 経路と共通)。
     let resp = issue_session(&mut tx, user_id).await?;
     tx.commit().await?;
     Ok(Json(resp))
+}
+
+/// login_token を消費する。pending_login と、同じ token_hash に紐づく passkey 認証途中状態
+/// (`webauthn_auth_states`) の両方を削除する。後者は `passkey_auth_begin` 後に別経路 (TOTP) で
+/// 2FA を通した場合に孤立しうるため、login_token を捨てる全経路でまとめて掃除する。
+async fn consume_login_token(
+    tx: &mut Transaction<'_, Postgres>,
+    token_hash: &[u8],
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM pending_logins WHERE token_hash = $1")
+        .bind(token_hash)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM webauthn_auth_states WHERE token_hash = $1")
+        .bind(token_hash)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 /// 2FA 通過後の共通処理: セッションを発行し、MK/DK ラップ blob と sync_cursor を返す。
@@ -604,14 +616,7 @@ pub async fn passkey_auth_finish(
     let expires_at: DateTime<Utc> = row.get("expires_at");
     let attempts: i32 = row.get("failed_attempts");
     if expires_at < Utc::now() || attempts >= MAX_2FA_ATTEMPTS {
-        sqlx::query("DELETE FROM pending_logins WHERE token_hash = $1")
-            .bind(&token_hash)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM webauthn_auth_states WHERE token_hash = $1")
-            .bind(&token_hash)
-            .execute(&mut *tx)
-            .await?;
+        consume_login_token(&mut tx, &token_hash).await?;
         tx.commit().await?;
         return Err(AppError::Unauthorized);
     }
@@ -648,49 +653,49 @@ pub async fn passkey_auth_finish(
         }
     };
 
-    // counter を前進 (sign_count 後退は上の finish が Err にするためここは前進のみ)。
+    // 認証された credential を cred_id (UNIQUE) で 1 行に絞って更新する。start_passkey_authentication
+    // でこのユーザーの passkey 群を allowCredentials に渡しているため、該当行は必ず存在する。
+    let cred_id = auth_result.cred_id().as_ref().to_vec();
     if auth_result.needs_update() {
-        let rows =
-            sqlx::query("SELECT id, public_key FROM webauthn_credentials WHERE user_id = $1")
-                .bind(user_id)
-                .fetch_all(&mut *tx)
-                .await?;
-        for r in rows {
+        // counter を前進 (sign_count 後退は上の finish が Err にするためここは前進のみ)。
+        let row = sqlx::query(
+            "SELECT public_key FROM webauthn_credentials \
+             WHERE user_id = $1 AND cred_id = $2 FOR UPDATE",
+        )
+        .bind(user_id)
+        .bind(&cred_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(r) = row {
             let bytes: Vec<u8> = r.get("public_key");
             let mut pk: Passkey = serde_json::from_slice(&bytes).map_err(|_| AppError::Internal)?;
-            if pk.cred_id().as_ref() == auth_result.cred_id().as_ref() {
-                pk.update_credential(&auth_result);
-                let updated = serde_json::to_vec(&pk).map_err(|_| AppError::Internal)?;
-                let id: Uuid = r.get("id");
-                sqlx::query(
-                    "UPDATE webauthn_credentials \
-                     SET public_key = $2, sign_count = $3, last_used_at = now() WHERE id = $1",
-                )
-                .bind(id)
-                .bind(updated)
-                .bind(i64::from(auth_result.counter()))
-                .execute(&mut *tx)
-                .await?;
-                break;
-            }
-        }
-    } else {
-        sqlx::query("UPDATE webauthn_credentials SET last_used_at = now() WHERE user_id = $1 AND cred_id = $2")
+            pk.update_credential(&auth_result);
+            let updated = serde_json::to_vec(&pk).map_err(|_| AppError::Internal)?;
+            sqlx::query(
+                "UPDATE webauthn_credentials \
+                 SET public_key = $3, sign_count = $4, last_used_at = now() \
+                 WHERE user_id = $1 AND cred_id = $2",
+            )
             .bind(user_id)
-            .bind(auth_result.cred_id().as_ref())
+            .bind(&cred_id)
+            .bind(updated)
+            .bind(i64::from(auth_result.counter()))
             .execute(&mut *tx)
             .await?;
+        }
+    } else {
+        sqlx::query(
+            "UPDATE webauthn_credentials SET last_used_at = now() \
+             WHERE user_id = $1 AND cred_id = $2",
+        )
+        .bind(user_id)
+        .bind(&cred_id)
+        .execute(&mut *tx)
+        .await?;
     }
 
     // login_token + auth_state を消費し、2FA 通過後のセッション + blob を発行する。
-    sqlx::query("DELETE FROM pending_logins WHERE token_hash = $1")
-        .bind(&token_hash)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("DELETE FROM webauthn_auth_states WHERE token_hash = $1")
-        .bind(&token_hash)
-        .execute(&mut *tx)
-        .await?;
+    consume_login_token(&mut tx, &token_hash).await?;
     let resp = issue_session(&mut tx, user_id).await?;
     tx.commit().await?;
     Ok(Json(resp))
