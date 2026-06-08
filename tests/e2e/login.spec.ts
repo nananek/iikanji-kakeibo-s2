@@ -45,7 +45,13 @@ test('login ceremony unlocks DK and authenticates a session', async ({ page }) =
   await page.getByLabel('TOTP コード').fill(totpCode(secret, 30_000));
   await page.getByRole('button', { name: '確認' }).click();
 
-  const done = page.getByTestId('login-done');
-  await expect(done).toBeVisible({ timeout: 30_000 });
-  await expect(done).toContainText('同期カーソル');
+  // ログイン成功 → DK アンロック → Ledger シェルへ遷移 (email 表示)。
+  const shell = page.getByTestId('ledger-shell');
+  await expect(shell).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId('ledger-welcome')).toContainText(email);
+
+  // ログアウトで Session 破棄 → 認証画面へ戻る。
+  await page.getByTestId('logout').click();
+  await expect(page.getByTestId('tab-login')).toBeVisible();
+  await expect(shell).toHaveCount(0);
 });

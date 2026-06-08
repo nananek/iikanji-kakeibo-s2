@@ -16,6 +16,7 @@ use leptos::task::spawn_local;
 
 use crate::api::Client;
 use crate::crypto_glue::{build_signup, derive_login, unlock_data_key, LoginKeys};
+use iikanji_crypto::DataKey;
 use iikanji_types::auth::{
     LoginBeginRequest, LoginVerifyRequest, TotpConfirmRequest, TotpVerifyRequest,
 };
@@ -195,13 +196,28 @@ enum LoginStep {
     Form,
     /// authKey 検証済み → TOTP 待ち。`login_token` は signal、`LoginKeys` は StoredValue 保持。
     Totp,
-    /// 2FA 通過 + DK アンロック済み。`cursor` は認証付き API 疎通の証跡。
-    Done { cursor: u64 },
 }
 
-/// login フォーム + TOTP 2FA + DK アンロック。
+/// ログイン後のアプリセッション。復元した DK と、セッショントークンを持つ API クライアントを
+/// アプリ状態として保持する。**メモリのみ** — IndexedDB 等へ永続化しない。drop で DK/トークンを
+/// zeroize する (`DataKey` は ZeroizeOnDrop、`Client` の token は `Zeroizing`)。
+pub struct Session {
+    /// 復元した Data Key。財務レコードの seal/open に使う (利用は PR-3c2)。
+    #[allow(dead_code)]
+    pub dk: DataKey,
+    /// セッショントークンを持つ API クライアント。sync push/pull に使う (利用は PR-3c2)。
+    #[allow(dead_code)]
+    pub client: Client,
+    pub email: String,
+    pub cursor: u64,
+}
+
+/// login フォーム + TOTP 2FA + DK アンロック。成功で `session` を確立し `logged_in` を立てる。
 #[component]
-pub fn LoginForm() -> impl IntoView {
+pub fn LoginForm(
+    session: StoredValue<Option<Session>>,
+    logged_in: RwSignal<bool>,
+) -> impl IntoView {
     let email = RwSignal::new(String::new());
     let password = RwSignal::new(String::new());
     let totp_code = RwSignal::new(String::new());
@@ -273,12 +289,13 @@ pub fn LoginForm() -> impl IntoView {
         }
         let token = login_token.get();
         let code = totp_code.get();
+        let em = email.get();
         busy.set(true);
         error.set(None);
         spawn_local(async move {
             let mut client = Client::new("");
             // 2FA 通過で初めて MK/DK ラップ blob (SessionResponse) を受領。
-            let session = match client
+            let session_resp = match client
                 .totp_2fa(&TotpVerifyRequest {
                     login_token: token,
                     code,
@@ -303,9 +320,8 @@ pub fn LoginForm() -> impl IntoView {
                     return;
                 }
             };
-            // wrapKey → MK → DK を復元 (E2EE unlock)。本 PR では復元成功の確認のみ
-            // (DK のアプリ状態保持は ledger UI で行う)。
-            let _dk = match unlock_data_key(&keys, &session.mk_pw, &session.dk_wrap) {
+            // wrapKey → MK → DK を復元 (E2EE unlock)。DK はアプリ Session として保持する。
+            let dk = match unlock_data_key(&keys, &session_resp.mk_pw, &session_resp.dk_wrap) {
                 Ok(dk) => dk,
                 Err(e) => {
                     error.set(Some(format!("復号鍵のアンロックに失敗しました: {e}")));
@@ -313,10 +329,18 @@ pub fn LoginForm() -> impl IntoView {
                     return;
                 }
             };
-            // セッショントークンで認証付き API (cursor) を実行し、セッション疎通を確認。
-            client.set_session_token(session.session_token);
+            // セッショントークンで認証付き API (cursor) を実行し、疎通確認 + 初期カーソル取得。
+            client.set_session_token(session_resp.session_token);
             match client.cursor().await {
-                Ok(c) => step.set(LoginStep::Done { cursor: c.cursor }),
+                Ok(c) => {
+                    session.set_value(Some(Session {
+                        dk,
+                        client,
+                        email: em,
+                        cursor: c.cursor,
+                    }));
+                    logged_in.set(true);
+                }
                 Err(e) => error.set(Some(format!("セッション確認に失敗しました: {e}"))),
             }
             busy.set(false);
@@ -381,15 +405,37 @@ pub fn LoginForm() -> impl IntoView {
                     }
                         .into_any()
                 }
-                LoginStep::Done { cursor } => {
-                    view! {
-                        <p data-testid="login-done" class="done">
-                            {format!("ログインしました (同期カーソル: {cursor})。")}
-                        </p>
-                    }
-                        .into_any()
-                }
             }}
+        </section>
+    }
+}
+
+/// ログイン後のシェル。DK 保持中であることを示し、ログアウトで Session を破棄する。
+/// 仕訳入力・残高/レポート・同期 UI は後続 PR でここに追加する。
+#[component]
+pub fn LedgerShell(
+    session: StoredValue<Option<Session>>,
+    logged_in: RwSignal<bool>,
+) -> impl IntoView {
+    // Session は logged_in=true の間は必ず Some。表示用に email/cursor を取り出す (静的)。
+    let (email, cursor) = session
+        .with_value(|s| s.as_ref().map(|s| (s.email.clone(), s.cursor)))
+        .unwrap_or_default();
+
+    let on_logout = move |_| {
+        // DK + セッショントークンを破棄 (drop で zeroize)。
+        session.set_value(None);
+        logged_in.set(false);
+    };
+
+    view! {
+        <section class="ledger" data-testid="ledger-shell">
+            <p data-testid="ledger-welcome">{format!("ログイン中: {email}")}</p>
+            <p class="muted">{format!("同期カーソル: {cursor}")}</p>
+            <button data-testid="logout" on:click=on_logout>
+                "ログアウト"
+            </button>
+            <p class="muted">"仕訳入力・残高表示は次の PR で追加します。"</p>
         </section>
     }
 }
