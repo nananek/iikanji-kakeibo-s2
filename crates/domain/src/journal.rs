@@ -9,6 +9,7 @@ use crate::money::Yen;
 
 /// 日付 (年/月/日)。完全な暦検証は後続で強化 (現状は範囲のみ)。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Date {
     year: i32,
     month: u8,
@@ -79,6 +80,7 @@ pub(crate) fn days_in_month(year: i32, month: u8) -> u8 {
 
 /// 仕訳明細行。借方・貸方のどちらか一方が正、もう一方は 0 (両方 0 や両方正は不正)。
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EntryLine {
     pub account: AccountCode,
     pub debit: Yen,
@@ -113,6 +115,7 @@ impl EntryLine {
 
 /// 仕訳。1 件は借方合計と貸方合計が一致する明細行の集合。
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JournalEntry {
     pub date: Date,
     pub description: String,

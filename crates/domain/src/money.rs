@@ -10,6 +10,7 @@ use core::ops::{Add, AddAssign, Neg, Sub, SubAssign};
 
 /// 円。整数 (`i64`)。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Yen(i64);
 
 impl Yen {

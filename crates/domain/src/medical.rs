@@ -9,6 +9,7 @@ use crate::money::Yen;
 
 /// 医療費 1 件。
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MedicalExpense {
     pub date: Date,
     pub patient: String,
