@@ -7,17 +7,20 @@
 //!
 //! 不変条件 (CLAUDE.md): サーバーへ出るのは authKey と ラップ blob のみ。MK/DK/wrapKey/
 //! recovery code は送らない。ラップ blob (`SessionResponse`) は 2FA 通過後にのみ受領する。
-//! 復元した `data_key` はメモリ保持 (アプリ状態への保持・利用は ledger UI で行う)。
-//! Argon2id はメインスレッドで実行 — Web Worker 化は堅牢化フェーズ (issue #12)。
+//! 復元した `data_key` はメモリ保持。
+//! 重い Argon2id は [`crate::worker`] (Web Worker) で実行し、メインスレッドを塞がない。
 
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
+use zeroize::Zeroize;
+
 use crate::api::Client;
-use crate::crypto_glue::{build_signup, derive_login, unlock_data_key, LoginKeys};
+use crate::crypto_glue::{build_signup_from_pmk, login_keys_from_pmk, unlock_data_key, LoginKeys};
 use crate::records::{open_record, seal_record};
-use iikanji_crypto::DataKey;
+use crate::worker::{argon_hash_in_worker, ArgonInput};
+use iikanji_crypto::{generate_salt, pmk_from_hash, DataKey};
 use iikanji_domain::{
     income_expense_summary, AccountCode, AccountInfo, Chart, Date, EntryLine, JournalEntry, Record,
     RecordPayload, Yen,
@@ -64,8 +67,26 @@ pub fn SignupForm() -> impl IntoView {
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            // Argon2id + MK/DK 生成 (CPU 重・メインスレッド。Web Worker 化は後続)。
-            let out = match build_signup(&em, &pw, 1) {
+            // 重い Argon2id は Web Worker で実行し、メインスレッドを塞がない。
+            let salt = generate_salt();
+            let mut raw = match argon_hash_in_worker(ArgonInput {
+                password: pw.into_bytes(),
+                salt: salt.to_vec(),
+                kdf_version: 1,
+            })
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    error.set(Some(format!("鍵生成に失敗しました: {e}")));
+                    busy.set(false);
+                    return;
+                }
+            };
+            // PMK 材料 → Pmk → 残りの軽い処理 (MK/DK 生成・ラップ) はメインスレッド。
+            let pmk = pmk_from_hash(raw);
+            raw.zeroize();
+            let out = match build_signup_from_pmk(&em, &pmk, salt.to_vec(), 1) {
                 Ok(o) => o,
                 Err(e) => {
                     error.set(Some(format!("鍵生成に失敗しました: {e}")));
@@ -258,15 +279,25 @@ pub fn LoginForm(
                     return;
                 }
             };
-            // authKey/wrapKey を導出 (Argon2id・メインスレッド)。
-            let keys = match derive_login(&pw, &begin.salt_pw, begin.kdf_version) {
-                Ok(k) => k,
+            // Argon2id は Web Worker で実行 (メインスレッドを塞がない)。
+            let mut raw = match argon_hash_in_worker(ArgonInput {
+                password: pw.into_bytes(),
+                salt: begin.salt_pw.clone(),
+                kdf_version: begin.kdf_version,
+            })
+            .await
+            {
+                Ok(r) => r,
                 Err(e) => {
                     error.set(Some(format!("鍵導出に失敗しました: {e}")));
                     busy.set(false);
                     return;
                 }
             };
+            // PMK 材料 → wrapKey/authKey 導出はメインスレッド (軽量)。
+            let pmk = pmk_from_hash(raw);
+            raw.zeroize();
+            let keys = login_keys_from_pmk(&pmk);
             // authKey を提示 → 成功で login_token (blob はまだ受け取らない)。
             match client
                 .login_verify(&LoginVerifyRequest {

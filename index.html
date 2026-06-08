@@ -16,6 +16,15 @@
       data-bin="iikanji-client"
       data-wasm-opt="z"
     />
+    <!-- Argon2id を回す Web Worker (メインスレッドを塞がない)。 -->
+    <link
+      data-trunk
+      rel="rust"
+      href="crates/client/Cargo.toml"
+      data-bin="argon_worker"
+      data-type="worker"
+      data-wasm-opt="z"
+    />
   </head>
   <body></body>
 </html>

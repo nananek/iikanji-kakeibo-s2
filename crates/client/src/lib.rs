@@ -19,6 +19,9 @@ mod sync;
 mod app;
 #[cfg(target_arch = "wasm32")]
 mod ui;
+// Argon2id Web Worker (gloo-worker)。wasm32 限定。
+#[cfg(target_arch = "wasm32")]
+mod worker;
 
 pub use api::{ApiError, ApiRequest, Method};
 pub use crypto_glue::{
@@ -32,3 +35,5 @@ pub use sync::{reconcile, resolve, RemoteRecord};
 pub use api::Client;
 #[cfg(target_arch = "wasm32")]
 pub use app::App;
+#[cfg(target_arch = "wasm32")]
+pub use worker::{argon_hash_in_worker, ArgonInput, ArgonWorker};
