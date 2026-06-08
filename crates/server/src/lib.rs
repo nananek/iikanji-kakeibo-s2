@@ -9,6 +9,8 @@
 mod auth;
 pub mod config;
 mod error;
+mod session;
+mod sync;
 
 use axum::routing::{get, post};
 use axum::Router;
@@ -55,6 +57,9 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login/begin", post(auth::login_begin))
         .route("/auth/login/verify", post(auth::login_verify))
         .route("/auth/2fa/totp", post(auth::totp_2fa))
+        .route("/sync/push", post(sync::push))
+        .route("/sync/pull", get(sync::pull))
+        .route("/sync/cursor", get(sync::cursor))
         .with_state(state)
 }
 

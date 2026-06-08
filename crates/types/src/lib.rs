@@ -20,5 +20,6 @@ pub use auth::{
     TotpVerifyRequest,
 };
 pub use sync::{
-    EncRecord, PullResponse, PushChange, PushRequest, PushResponse, PushResult, PushStatus,
+    CursorResponse, EncRecord, PullResponse, PushChange, PushRequest, PushResponse, PushResult,
+    PushStatus,
 };

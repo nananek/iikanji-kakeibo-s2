@@ -66,3 +66,9 @@ pub struct PullResponse {
     pub next_cursor: u64,
     pub has_more: bool,
 }
+
+/// `GET /sync/cursor` の応答 (per-user の現在カーソル = 最新 seq)。
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CursorResponse {
+    pub cursor: u64,
+}
