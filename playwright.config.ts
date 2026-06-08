@@ -5,6 +5,9 @@ import { defineConfig, devices } from '@playwright/test';
 // `trunk build --release` で事前生成しておく (CI のステップ参照)。Postgres も別途用意。
 const PORT = 8080;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
+// passkey spec (Chromium) は localhost オリジンで実行する。WebAuthn の RP ID は IP リテラルだと
+// ブラウザに拒否されるため (127.0.0.1 不可)。server は 0.0.0.0 で待受け、localhost/127.0.0.1 双方から届く。
+const WEBAUTHN_ORIGIN = `http://localhost:${PORT}`;
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -18,7 +21,20 @@ export default defineConfig({
     baseURL: BASE_URL,
     trace: 'on-first-retry',
   },
-  projects: [{ name: 'firefox', use: { ...devices['Desktop Firefox'] } }],
+  projects: [
+    // 既存スペック (signup/login/ledger) は Firefox。passkey spec は除外する。
+    {
+      name: 'firefox',
+      use: { ...devices['Desktop Firefox'] },
+      testIgnore: /passkey\.spec\.ts/,
+    },
+    // passkey spec は Chromium のみ (CDP 仮想認証器)。localhost オリジンで実行する。
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'], baseURL: WEBAUTHN_ORIGIN },
+      testMatch: /passkey\.spec\.ts/,
+    },
+  ],
   webServer: {
     command: './target/debug/iikanji-server',
     url: `${BASE_URL}/health`,
@@ -27,9 +43,13 @@ export default defineConfig({
     env: {
       DATABASE_URL:
         process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/iikanji_test',
-      BIND_ADDR: `127.0.0.1:${PORT}`,
+      // 0.0.0.0 で待受け、127.0.0.1 (firefox/health) と localhost (chromium/passkey) の双方に応答する。
+      BIND_ADDR: `0.0.0.0:${PORT}`,
       STATIC_DIR: 'dist',
       SERVER_SECRET: 'e2e-not-a-real-secret',
+      // passkey の RP ID / origin。localhost はブラウザが安全コンテキスト + 有効 RP ID として扱う。
+      WEBAUTHN_RP_ID: 'localhost',
+      WEBAUTHN_ORIGIN,
     },
   },
 });
