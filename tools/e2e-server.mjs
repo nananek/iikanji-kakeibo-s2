@@ -8,7 +8,7 @@
 
 import http from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
-import { extname, join, normalize, resolve } from 'node:path';
+import { extname, join, normalize, resolve, sep } from 'node:path';
 
 const PORT = Number(process.env.E2E_PORT ?? 8080);
 const BACKEND = new URL(process.env.E2E_BACKEND ?? 'http://127.0.0.1:3000');
@@ -33,8 +33,8 @@ async function serveStatic(res, pathname) {
   let rel = decodeURIComponent(pathname);
   if (rel === '/' || rel === '') rel = '/index.html';
   const filePath = normalize(join(DIST, rel));
-  // ディレクトリトラバーサル防止。
-  if (!filePath.startsWith(DIST)) {
+  // ディレクトリトラバーサル防止 (兄弟ディレクトリ dist-evil 等の prefix 誤判定も排除)。
+  if (filePath !== DIST && !filePath.startsWith(DIST + sep)) {
     res.writeHead(403).end('forbidden');
     return;
   }
