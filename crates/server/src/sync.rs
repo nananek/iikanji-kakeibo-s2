@@ -19,6 +19,8 @@ use crate::AppState;
 const DEFAULT_PULL_LIMIT: i64 = 500;
 const MAX_PULL_LIMIT: i64 = 1000;
 const MAX_PUSH_BATCH: usize = 500;
+/// 1 レコードあたりの ciphertext サイズ上限 (ストレージ DoS 緩和)。
+const MAX_CIPHERTEXT_BYTES: usize = 1 << 20; // 1 MiB
 /// `ct_size` のバケット幅 (B)。size メタデータの漏洩緩和。
 const SIZE_BUCKET: usize = 256;
 
@@ -41,8 +43,9 @@ fn seq_u64(seq: i64) -> Result<u64, AppError> {
 fn row_to_record(row: &PgRow) -> Result<EncRecord, AppError> {
     Ok(EncRecord {
         record_id: row.get("record_id"),
-        record_type: row.get::<i16, _>("record_type") as u16,
-        version: row.get::<i32, _>("version") as u32,
+        record_type: u16::try_from(row.get::<i16, _>("record_type"))
+            .map_err(|_| AppError::Internal)?,
+        version: u32::try_from(row.get::<i32, _>("version")).map_err(|_| AppError::Internal)?,
         seq: seq_u64(row.get::<i64, _>("seq"))?,
         tombstone: row.get("tombstone"),
         ciphertext: row.get::<Option<Vec<u8>>, _>("ciphertext"),
@@ -67,6 +70,11 @@ pub async fn push(
             return Err(AppError::BadRequest(
                 "non-tombstone change requires ciphertext",
             ));
+        }
+        if let Some(ct) = &change.ciphertext {
+            if ct.len() > MAX_CIPHERTEXT_BYTES {
+                return Err(AppError::BadRequest("ciphertext too large"));
+            }
         }
         let ct_size = bucketed_ct_size(change.ciphertext.as_ref());
 
@@ -105,7 +113,8 @@ pub async fn push(
                 results.push(applied(change.record_id, 1, seq_u64(seq)?));
             }
             Some(row) => {
-                let cur_version = row.get::<i32, _>("version") as u32;
+                let cur_version =
+                    u32::try_from(row.get::<i32, _>("version")).map_err(|_| AppError::Internal)?;
                 if cur_version != change.expected_version {
                     let seq = seq_u64(row.get::<i64, _>("seq"))?;
                     results.push(conflict(
@@ -116,8 +125,12 @@ pub async fn push(
                     ));
                     continue;
                 }
+                let new_version = change
+                    .expected_version
+                    .checked_add(1)
+                    .filter(|&v| v <= i32::MAX as u32)
+                    .ok_or(AppError::BadRequest("version overflow"))?;
                 let seq = alloc_seq(&mut tx, user_id).await?;
-                let new_version = change.expected_version + 1;
                 // version 条件も付け、ロック + アプリ CAS に DB レベルの安全網を重ねる。
                 sqlx::query(
                     "UPDATE enc_records \
@@ -199,12 +212,13 @@ pub async fn cursor(
     State(st): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<CursorResponse>, AppError> {
-    let cursor: i64 = sqlx::query_scalar("SELECT next_seq - 1 FROM user_seq WHERE user_id = $1")
-        .bind(user.0)
-        .fetch_one(&st.pool)
-        .await?;
+    let cursor: Option<i64> =
+        sqlx::query_scalar("SELECT next_seq - 1 FROM user_seq WHERE user_id = $1")
+            .bind(user.0)
+            .fetch_optional(&st.pool)
+            .await?;
     Ok(Json(CursorResponse {
-        cursor: seq_u64(cursor)?,
+        cursor: seq_u64(cursor.unwrap_or(0))?,
     }))
 }
 
@@ -226,11 +240,12 @@ async fn current_cursor(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,
 ) -> Result<u64, AppError> {
-    let cursor: i64 = sqlx::query_scalar("SELECT next_seq - 1 FROM user_seq WHERE user_id = $1")
-        .bind(user_id)
-        .fetch_one(&mut **tx)
-        .await?;
-    seq_u64(cursor)
+    let cursor: Option<i64> =
+        sqlx::query_scalar("SELECT next_seq - 1 FROM user_seq WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    seq_u64(cursor.unwrap_or(0))
 }
 
 fn applied(record_id: Uuid, new_version: u32, seq: u64) -> PushResult {
