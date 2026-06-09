@@ -17,12 +17,37 @@ services:
       timeout: 5s
       retries: 10
 
+  # 証憑(添付)バイナリの S3 互換ストレージ (versitygw, POSIX バック)。サーバーは暗号 blob のみを
+  # 中継保存し復号しない。S3 未設定だとサーバーは in-memory ストアにフォールバックする (再起動で消える)
+  # ため、永続化するなら本サービスを使う。
+  s3-init:
+    # versitygw posix backend はトップレベルのディレクトリをバケットとして扱う。事前にバケット用
+    # ディレクトリを作っておく (object_store は CreateBucket を呼ばないため)。
+    image: busybox
+    command: ["sh", "-c", "mkdir -p /data/iikanji"]
+    volumes:
+      - s3data:/data
+  s3:
+    image: ghcr.io/versity/versitygw:latest
+    command: ["posix", "/data"]
+    depends_on:
+      s3-init:
+        condition: service_completed_successfully
+    environment:
+      # 本番では固有値に変更すること。
+      ROOT_ACCESS_KEY: iikanji
+      ROOT_SECRET_KEY: change-me-s3-secret
+    volumes:
+      - s3data:/data
+
   app:
     build: .
     # image: ghcr.io/nananek/iikanji-kakeibo-s2:main
     depends_on:
       db:
         condition: service_healthy
+      s3:
+        condition: service_started
     environment:
       DATABASE_URL: postgres://postgres:postgres@db:5432/iikanji
       # 本番では必ず固有のランダム値に変更すること (例: openssl rand -hex 32)。
@@ -33,8 +58,15 @@ services:
       # 本番ドメインで配信するなら実ホスト名 + https オリジンへ変更すること (docs/DEPLOY.md 参照)。
       WEBAUTHN_RP_ID: localhost
       WEBAUTHN_ORIGIN: http://localhost:8080
+      # 証憑バイナリの S3 互換ストレージ (versitygw)。未設定だと in-memory フォールバック。
+      S3_ENDPOINT: http://s3:7070
+      S3_BUCKET: iikanji
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY: iikanji
+      S3_SECRET_KEY: change-me-s3-secret
     ports:
       - "8080:8080"
 
 volumes:
   pgdata:
+  s3data:

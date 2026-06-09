@@ -49,3 +49,12 @@ pub(crate) fn random_array<const N: usize>() -> [u8; N] {
     getrandom::getrandom(&mut buf).expect("OS CSPRNG unavailable");
     buf
 }
+
+/// データの SHA-256。添付ファイルの content hash (整合性確認) 等に使う汎用ハッシュ。
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(data);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}

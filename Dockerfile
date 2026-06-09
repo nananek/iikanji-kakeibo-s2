@@ -11,6 +11,10 @@
 #   WEBAUTHN_RP_ID  (既定 localhost) passkey の RP ID = 配信ドメイン。本番は実ホスト名
 #   WEBAUTHN_ORIGIN (既定 http://localhost:8080) passkey の origin。本番は https 必須
 #                   (localhost 以外で http だと起動失敗。設定し忘れると本番で passkey が機能しない)
+#   S3_ENDPOINT / S3_BUCKET / S3_REGION / S3_ACCESS_KEY / S3_SECRET_KEY
+#                   証憑(添付)バイナリの S3 互換ストレージ (versitygw 等)。未設定だと in-memory
+#                   フォールバック (再起動で消える) — 本番は必ず設定する
+#   MAX_ATTACHMENT_BYTES (既定 25MiB) アップロード可能な暗号 blob の上限
 
 ############################  builder  ############################
 FROM rust:1.96-bookworm AS builder

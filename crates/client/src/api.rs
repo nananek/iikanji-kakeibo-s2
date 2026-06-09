@@ -227,6 +227,7 @@ mod wasm_client {
         LoginBeginResponse, LoginVerifyResponse, SessionResponse, SignupResponse,
     };
     use iikanji_types::sync::{CursorResponse, PullResponse, PushResponse};
+    use uuid::Uuid;
     use webauthn_rs_proto::{
         CreationChallengeResponse, PublicKeyCredential, RegisterPublicKeyCredential,
         RequestChallengeResponse,
@@ -408,6 +409,71 @@ mod wasm_client {
                 needs_auth: false,
             };
             self.send_json(req).await
+        }
+
+        // ---- 添付 (octet-stream の生バイト授受) ----
+
+        /// 添付暗号 blob をアップロードする (`PUT /attachments/{id}`)。
+        pub async fn attachment_put(&self, id: Uuid, blob: Vec<u8>) -> Result<(), ApiError> {
+            let token = self.bearer()?;
+            let array = js_sys::Uint8Array::from(blob.as_slice());
+            let resp = Request::put(&format!("{}/attachments/{}", self.base_url, id))
+                .header("Authorization", &token)
+                .header("Content-Type", "application/octet-stream")
+                .body(array)
+                .map_err(|e| ApiError::Network(e.to_string()))?
+                .send()
+                .await
+                .map_err(|e| ApiError::Network(e.to_string()))?;
+            self.expect_ok(resp).await
+        }
+
+        /// 添付暗号 blob をダウンロードする (`GET /attachments/{id}`)。
+        pub async fn attachment_get(&self, id: Uuid) -> Result<Vec<u8>, ApiError> {
+            let token = self.bearer()?;
+            let resp = Request::get(&format!("{}/attachments/{}", self.base_url, id))
+                .header("Authorization", &token)
+                .send()
+                .await
+                .map_err(|e| ApiError::Network(e.to_string()))?;
+            let status = resp.status();
+            if (200..300).contains(&status) {
+                resp.binary()
+                    .await
+                    .map_err(|e| ApiError::Network(e.to_string()))
+            } else {
+                Err(status_error(status, &resp.text().await.unwrap_or_default()))
+            }
+        }
+
+        /// 添付を削除する (`DELETE /attachments/{id}`、メタ行 + blob)。
+        pub async fn attachment_delete(&self, id: Uuid) -> Result<(), ApiError> {
+            let token = self.bearer()?;
+            let resp = Request::delete(&format!("{}/attachments/{}", self.base_url, id))
+                .header("Authorization", &token)
+                .send()
+                .await
+                .map_err(|e| ApiError::Network(e.to_string()))?;
+            self.expect_ok(resp).await
+        }
+
+        /// `Authorization: Bearer <token>` 値を作る (セッション欠如は Network エラー)。
+        fn bearer(&self) -> Result<String, ApiError> {
+            let token = self
+                .session_token
+                .as_ref()
+                .ok_or_else(|| ApiError::Network("missing session token".into()))?;
+            Ok(format!("Bearer {}", token.as_str()))
+        }
+
+        /// 2xx を `Ok(())`、それ以外を `ApiError::Status` に写像する (本体なし応答)。
+        async fn expect_ok(&self, resp: gloo_net::http::Response) -> Result<(), ApiError> {
+            let status = resp.status();
+            if (200..300).contains(&status) {
+                Ok(())
+            } else {
+                Err(status_error(status, &resp.text().await.unwrap_or_default()))
+            }
         }
     }
 }
