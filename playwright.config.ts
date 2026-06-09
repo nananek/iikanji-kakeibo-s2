@@ -50,6 +50,13 @@ export default defineConfig({
       // passkey の RP ID / origin。localhost はブラウザが安全コンテキスト + 有効 RP ID として扱う。
       WEBAUTHN_RP_ID: 'localhost',
       WEBAUTHN_ORIGIN,
+      // 添付ストレージ。S3_* が環境にあれば versitygw 等へ接続、無ければ空 → サーバーは in-memory に
+      // フォールバックする (versitygw 無しのローカル e2e でも動く)。CI は versitygw を立てて設定する。
+      S3_ENDPOINT: process.env.S3_ENDPOINT ?? '',
+      S3_BUCKET: process.env.S3_BUCKET ?? '',
+      S3_REGION: process.env.S3_REGION ?? 'us-east-1',
+      S3_ACCESS_KEY: process.env.S3_ACCESS_KEY ?? '',
+      S3_SECRET_KEY: process.env.S3_SECRET_KEY ?? '',
     },
   },
 });
