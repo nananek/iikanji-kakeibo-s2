@@ -9,6 +9,7 @@ mod b64;
 mod b64_opt;
 
 pub mod auth;
+pub mod migrate;
 pub mod sync;
 
 #[cfg(test)]
@@ -18,6 +19,10 @@ pub use auth::{
     Factor, KeyBlobs, LoginBeginRequest, LoginBeginResponse, LoginVerifyRequest,
     LoginVerifyResponse, SessionResponse, SignupRequest, SignupResponse, TotpConfirmRequest,
     TotpVerifyRequest,
+};
+pub use migrate::{
+    LegacyAccount, LegacyExport, LegacyFiscalClose, LegacyJournalEntry, LegacyLine, LegacyMedical,
+    LegacyVoucher, EXPORT_FORMAT, EXPORT_VERSION,
 };
 pub use sync::{
     CursorResponse, EncRecord, PullResponse, PushChange, PushRequest, PushResponse, PushResult,

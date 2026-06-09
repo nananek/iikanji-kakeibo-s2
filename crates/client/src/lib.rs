@@ -11,6 +11,7 @@
 
 pub mod api;
 mod crypto_glue;
+mod migrate;
 mod records;
 mod sync;
 
@@ -34,6 +35,7 @@ pub use crypto_glue::{
     build_signup, build_signup_from_pmk, derive_login, login_keys_from_pmk, unlock_data_key,
     LoginKeys, SignupOutput,
 };
+pub use migrate::{map_export, parse_export, MigrateError, MigrationPlan};
 pub use records::{open_record, seal_record, RecordCryptoError};
 pub use sync::{reconcile, resolve, RemoteRecord};
 
