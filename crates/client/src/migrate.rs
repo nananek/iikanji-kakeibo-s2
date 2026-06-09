@@ -131,6 +131,13 @@ fn map_account(a: &LegacyAccount, warnings: &mut Vec<String>) -> Option<AccountI
     let tax_category = a.tax_category.as_deref().and_then(tax_category_from);
     let cost_type = a.cost_type.as_deref().and_then(cost_type_from);
     let system_role = a.system_role.as_deref().and_then(system_role_from);
+    // proprietor(事業主) は廃止 → 通常科目として取り込むが、サイレントだと気付けないので警告する。
+    if a.system_role.as_deref() == Some("proprietor") {
+        warnings.push(format!(
+            "科目 {} ({}) の事業主区分は新設計で廃止のため通常科目として取り込みました",
+            a.code, a.name
+        ));
+    }
     Some(AccountInfo {
         code: AccountCode::new(a.code.clone()),
         account_type,
@@ -321,6 +328,8 @@ mod tests {
         let mut w = Vec::new();
         let acc = map_account(&a, &mut w).unwrap();
         assert_eq!(acc.system_role, None); // proprietor は廃止 → None
-        assert!(w.is_empty());
+                                           // サイレントに落とさず、通常科目化を警告する。
+        assert_eq!(w.len(), 1, "warnings={w:?}");
+        assert!(w[0].contains("事業主区分"));
     }
 }

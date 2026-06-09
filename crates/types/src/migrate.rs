@@ -17,6 +17,16 @@ fn default_true() -> bool {
     true
 }
 
+/// 旧財務の平文 freetext（患者名・科目名・摘要等）を `Debug` に出さず文字数だけ示すラッパ。
+/// 誤って `tracing` 等へ流れても内容が漏れないようにする（[`LegacyVoucher`] の画像バイトと同方針）。
+struct Redacted<'a>(&'a str);
+
+impl fmt::Debug for Redacted<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{} chars]", self.0.chars().count())
+    }
+}
+
 /// 移植 JSON のルート。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LegacyExport {
@@ -37,7 +47,7 @@ pub struct LegacyExport {
 }
 
 /// 旧 `accounts`(+`account_types.code`)。enum 系は文字列コード（client が enum へ写像する）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LegacyAccount {
     pub code: String,
     /// "asset" | "liability" | "equity" | "revenue" | "expense"。
@@ -56,7 +66,7 @@ pub struct LegacyAccount {
 }
 
 /// 旧 `journal_entries` + 明細。`key` は旧 entry id（証憑↔仕訳の紐付け handle）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LegacyJournalEntry {
     pub key: String,
     /// "YYYY-MM-DD"。
@@ -77,7 +87,7 @@ pub struct LegacyLine {
 }
 
 /// 旧 `medical_expenses`。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LegacyMedical {
     pub date: String,
     #[serde(default)]
@@ -123,6 +133,48 @@ impl fmt::Debug for LegacyVoucher {
     }
 }
 
+// 以下 3 つは財務平文の freetext（科目名・摘要・患者名等）を `Debug` から伏せる。
+// 構造把握用の code/date/金額は残し、内容文字列は文字数のみ示す。
+
+impl fmt::Debug for LegacyAccount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LegacyAccount")
+            .field("code", &self.code)
+            .field("account_type", &self.account_type)
+            .field("name", &Redacted(&self.name))
+            .field("tax_category", &self.tax_category)
+            .field("cost_type", &self.cost_type)
+            .field("system_role", &self.system_role)
+            .field("is_active", &self.is_active)
+            .field("display_order", &self.display_order)
+            .finish()
+    }
+}
+
+impl fmt::Debug for LegacyJournalEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LegacyJournalEntry")
+            .field("key", &self.key)
+            .field("date", &self.date)
+            .field("description", &Redacted(&self.description))
+            .field("lines", &self.lines)
+            .finish()
+    }
+}
+
+impl fmt::Debug for LegacyMedical {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LegacyMedical")
+            .field("date", &self.date)
+            .field("patient", &Redacted(&self.patient))
+            .field("hospital", &Redacted(&self.hospital))
+            .field("treatment", &Redacted(&self.treatment))
+            .field("paid", &self.paid)
+            .field("reimbursement", &self.reimbursement)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +202,45 @@ mod tests {
         assert_eq!(exp.medical_expenses[0].reimbursement, 0); // default
         assert_eq!(exp.vouchers[0].data, vec![1, 2, 3]); // base64 復号
         assert_eq!(exp.vouchers[0].entry_key.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn debug_redacts_financial_freetext() {
+        // 患者名・科目名・摘要・画像バイトは Debug に内容が出ない（[N chars]/[N bytes] のみ）。
+        let med = LegacyMedical {
+            date: "2026-01-05".into(),
+            patient: "山田太郎".into(),
+            hospital: "秘密病院".into(),
+            treatment: "極秘治療".into(),
+            paid: 5000,
+            reimbursement: 0,
+        };
+        let acc = LegacyAccount {
+            code: "5010".into(),
+            account_type: "expense".into(),
+            name: "内緒の科目".into(),
+            tax_category: None,
+            cost_type: None,
+            system_role: None,
+            is_active: true,
+            display_order: 0,
+        };
+        let je = LegacyJournalEntry {
+            key: "1".into(),
+            date: "2026-06-08".into(),
+            description: "ひみつの摘要".into(),
+            lines: vec![],
+        };
+        for (dbg, secret) in [
+            (format!("{med:?}"), "山田太郎"),
+            (format!("{med:?}"), "秘密病院"),
+            (format!("{acc:?}"), "内緒の科目"),
+            (format!("{je:?}"), "ひみつの摘要"),
+        ] {
+            assert!(!dbg.contains(secret), "Debug leaked plaintext: {dbg}");
+        }
+        // 構造把握用フィールドは残る。
+        assert!(format!("{med:?}").contains("paid: 5000"));
+        assert!(format!("{acc:?}").contains("5010"));
     }
 }

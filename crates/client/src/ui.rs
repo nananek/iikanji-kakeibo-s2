@@ -820,7 +820,7 @@ async fn run_import(client: &Client, dk: &DataKey, plan: MigrationPlan) -> Resul
         };
         let attachment_id = Uuid::new_v4();
         let content_hash = sha256(&v.data);
-        let size = v.data.len() as u64;
+        let size = u64::try_from(v.data.len()).unwrap_or(u64::MAX);
         upload_attachment(client, dk, attachment_id, &v.data)
             .await
             .map_err(|e| {
