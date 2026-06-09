@@ -97,10 +97,11 @@ DATABASE_URL=postgres://... npx playwright test
 # 1) 旧 Postgres から移植 JSON を吐く（あなたのマシンで）
 cd tools/legacy-export
 python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+# --storage-dir は証憑画像のルート（省略すると証憑なし）。
 python export.py \
   --database-url postgres://user:pass@localhost:5432/iikanji \
   --user-email me@example.com \
-  --storage-dir /path/to/legacy/voucher-storage \   # 証憑画像のルート（省略可）
+  --storage-dir /path/to/legacy/voucher-storage \
   -o export.json
 
 # 2) 新 SPA にログイン → 画面下部「データ移植」で export.json を選択 → サマリー確認 → 取込実行
