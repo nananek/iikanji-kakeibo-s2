@@ -9,7 +9,7 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use common::*;
 use http_body_util::BodyExt;
-use iikanji_server::{router, AppState};
+use iikanji_server::{gc_orphaned_attachments, router, AppState};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -123,6 +123,53 @@ async fn delete_then_download_is_404() {
     assert_eq!(s, StatusCode::NO_CONTENT);
     let (s, _) = raw_request(&app, "GET", &uri(id), Some(&token), None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn gc_removes_orphan_blobs_only() {
+    use object_store::path::Path as StorePath;
+    use object_store::{ObjectStoreExt, PutPayload};
+
+    let pool = test_pool().await;
+    let st = AppState::new(pool.clone(), b"test-secret".to_vec());
+    let store = st.store.clone();
+    let app = router(st);
+    let token = authenticate(&app).await;
+
+    // 追跡される添付 (endpoint が enc_attachments 行 + blob を作る)。
+    let tracked = Uuid::new_v4();
+    let (s, _) = raw_request(
+        &app,
+        "PUT",
+        &uri(tracked),
+        Some(&token),
+        Some(b"keep-me".to_vec()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // 孤立 blob を store に直接置く (enc_attachments 行なし)。
+    let orphan_key = StorePath::from(format!("{}/{}", Uuid::new_v4(), Uuid::new_v4()));
+    store
+        .put(&orphan_key, PutPayload::from(b"orphan".to_vec()))
+        .await
+        .unwrap();
+
+    // GC (grace=0 で即時)。孤立 blob のみ消える。
+    let deleted = gc_orphaned_attachments(&pool, &store, chrono::Duration::zero())
+        .await
+        .unwrap();
+    assert!(deleted >= 1, "orphan should be deleted, got {deleted}");
+
+    // 孤立 blob は消えた。
+    assert!(matches!(
+        store.get(&orphan_key).await,
+        Err(object_store::Error::NotFound { .. })
+    ));
+    // 追跡される添付は残っている (endpoint で 200 + 同一バイト取得)。
+    let (s, body) = raw_request(&app, "GET", &uri(tracked), Some(&token), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body, b"keep-me".to_vec());
 }
 
 #[tokio::test]

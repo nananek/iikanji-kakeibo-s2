@@ -26,6 +26,7 @@
 | `S3_REGION` | 任意 | `us-east-1` | 署名用リージョン（S3 互換実装は任意値で可）。 |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | 添付を使うなら必須 | — | S3 互換ストレージの認証情報。 |
 | `MAX_ATTACHMENT_BYTES` | 任意 | `26214400`（25MiB） | アップロード可能な暗号 blob の上限（bytes）。 |
+| `ATTACHMENT_GC_INTERVAL_SECS` | 任意 | `3600` | 孤立した添付 blob（`enc_attachments` 行が無い S3 オブジェクト）を掃除する GC の間隔（秒）。`0` で無効。 |
 
 ### ⚠️ passkey を本番ドメインで使うとき
 
@@ -107,6 +108,10 @@ docker compose up --build      # → http://localhost:8080
 - `S3_*` 未設定なら **in-memory ストアにフォールバック**する（プロセス内のみ・再起動で消える）。
   単一プロセスのデモや E2E では十分だが、**本番では必ず永続ストレージを設定する**。
 - アップロード上限は `MAX_ATTACHMENT_BYTES`（既定 25MiB）。
+- **孤立 blob の GC**: サーバーは `enc_attachments` 行を真実とみなし、対応行の無い S3 オブジェクトを
+  定期削除する（`ATTACHMENT_GC_INTERVAL_SECS`、既定 1 時間、`0` で無効）。blob 削除失敗や
+  ユーザー削除の CASCADE で残った blob を回収する。直近 1 時間以内のオブジェクトはアップロード途中の
+  保護のため対象外。**複数インスタンス構成では各インスタンスが GC を回す**（重複削除は冪等で無害）。
 
 ## ヘルスチェック
 

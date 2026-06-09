@@ -38,6 +38,8 @@ base64 = { workspace = true }
 webauthn-rs = { workspace = true, features = ["danger-allow-state-serialisation"] }
 # 添付バイナリのストレージ (S3 互換 / テストは InMemory)。
 object_store = { workspace = true }
+# object_store の list ストリーム反復 (添付 GC) 用の StreamExt。
+futures = { version = "0.3", default-features = false, features = ["std"] }
 # webauthn-rs-core が引き込む openssl を vendored (静的リンク) で固める。これにより builder/runtime/CI で
 # libssl-dev / libssl3 / pkg-config に依存せず self-contained にビルドできる (reproducible build 方針)。
 # server コード自体は openssl を直接使わない — vendored feature を有効化するためだけの依存。

@@ -5,11 +5,17 @@
 //! 所有権が構造的に分離される (認証ユーザーの id からキーを組み立てるため、他人の blob には到達できない)。
 //! メタ行 (`enc_attachments`) は存在確認・サイズ・GC 用で、財務平文は持たない。
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use chrono::{Duration, Utc};
+use futures::StreamExt;
 use object_store::path::Path as StorePath;
-use object_store::{Error as StoreError, ObjectStoreExt, PutPayload};
+use object_store::{Error as StoreError, ObjectStore, ObjectStoreExt, PutPayload};
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -114,4 +120,53 @@ pub async fn delete(
         }
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 孤立した添付 blob を掃除する GC。
+///
+/// `enc_attachments` 行を**唯一の真実**とみなし、対応する行が無い S3 オブジェクトを削除する。
+/// これは「行は消えたが blob 削除に失敗した」ケースや、ユーザー削除の CASCADE で行だけ消えて S3 に
+/// blob が残るケースを回収する (サーバーは暗号化された VoucherMeta を読めず tombstone と blob を直接
+/// 紐付けられないため、行を介して間接的に GC する)。
+///
+/// **`grace` より新しいオブジェクトは残す** — アップロードは `store.put` → 行 INSERT の順で、その間は
+/// 一時的に「行の無い blob」になるため、できたての blob を誤削除しないようにする。
+/// 削除した個数を返す。
+pub async fn gc_orphaned_attachments(
+    pool: &PgPool,
+    store: &Arc<dyn ObjectStore>,
+    grace: Duration,
+) -> anyhow::Result<usize> {
+    // 既知キー "{user_id}/{attachment_id}" を集める。
+    let rows = sqlx::query("SELECT user_id, attachment_id FROM enc_attachments")
+        .fetch_all(pool)
+        .await?;
+    let known: HashSet<String> = rows
+        .iter()
+        .map(|r| {
+            format!(
+                "{}/{}",
+                r.get::<Uuid, _>("user_id"),
+                r.get::<Uuid, _>("attachment_id")
+            )
+        })
+        .collect();
+
+    let cutoff = Utc::now() - grace;
+    let mut deleted = 0usize;
+    let mut stream = store.list(None);
+    while let Some(meta) = stream.next().await {
+        let meta = meta?;
+        if meta.last_modified > cutoff {
+            continue; // grace 期間内 (アップロード途中の可能性) → 残す
+        }
+        if !known.contains(&meta.location.to_string()) {
+            match store.delete(&meta.location).await {
+                Ok(()) | Err(StoreError::NotFound { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
 }
