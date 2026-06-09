@@ -27,6 +27,8 @@ gloo-worker = { version = "0.6", features = ["futures"] }
 futures = { version = "0.3", default-features = false }
 # Uuid::new_v4() の乱数源 (wasm32 では js バックエンドが必要)。
 uuid = { workspace = true, features = ["js"] }
+# 証憑添付: <input type=file> の File を bytes に読む。
+gloo-file = { version = "0.3", features = ["futures"] }
 # WebAuthn (passkey)。proto(wasm) が CreationChallengeResponse↔web_sys の From 変換を提供。
 # web-sys の Window/Navigator/CredentialsContainer/Credential は proto が有効化しないため明示追加
 # (proto は CredentialCreationOptions/RequestOptions/PublicKeyCredential 側を有効化する)。
@@ -39,6 +41,17 @@ web-sys = { workspace = true, features = [
     "PublicKeyCredential",
     "CredentialCreationOptions",
     "CredentialRequestOptions",
+    # 証憑添付: ファイル選択とブラウザダウンロード trigger。
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "HtmlAnchorElement",
+    "File",
+    "FileList",
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
 ] }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }

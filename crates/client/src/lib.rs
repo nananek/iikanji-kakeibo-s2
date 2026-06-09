@@ -22,6 +22,9 @@ mod ui;
 // WebAuthn (passkey) のブラウザ glue (navigator.credentials)。wasm32 限定。
 #[cfg(target_arch = "wasm32")]
 mod webauthn_glue;
+// 証憑(添付)のブラウザ glue (ファイル読込・暗号アップロード/ダウンロード)。wasm32 限定。
+#[cfg(target_arch = "wasm32")]
+mod attachment_glue;
 // Argon2id Web Worker (gloo-worker)。wasm32 限定。
 #[cfg(target_arch = "wasm32")]
 mod worker;
@@ -38,6 +41,10 @@ pub use sync::{reconcile, resolve, RemoteRecord};
 pub use api::Client;
 #[cfg(target_arch = "wasm32")]
 pub use app::App;
+#[cfg(target_arch = "wasm32")]
+pub use attachment_glue::{
+    download_attachment, read_file, trigger_browser_download, upload_attachment,
+};
 #[cfg(target_arch = "wasm32")]
 pub use webauthn_glue::{authenticate_passkey, register_passkey};
 #[cfg(target_arch = "wasm32")]

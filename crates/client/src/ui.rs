@@ -17,14 +17,17 @@ use leptos::task::spawn_local;
 use zeroize::Zeroize;
 
 use crate::api::Client;
+use crate::attachment_glue::{
+    download_attachment, read_file, trigger_browser_download, upload_attachment,
+};
 use crate::crypto_glue::{build_signup_from_pmk, login_keys_from_pmk, unlock_data_key, LoginKeys};
 use crate::records::{open_record, seal_record};
 use crate::webauthn_glue::{authenticate_passkey, register_passkey};
 use crate::worker::{argon_hash_in_worker, ArgonInput};
-use iikanji_crypto::{generate_salt, pmk_from_hash, DataKey};
+use iikanji_crypto::{generate_salt, pmk_from_hash, sha256, DataKey, ATTACHMENT_CHUNK_LEN};
 use iikanji_domain::{
-    income_expense_summary, AccountCode, AccountInfo, Chart, Date, EntryLine, JournalEntry, Record,
-    RecordPayload, Yen,
+    income_expense_summary, record_type, AccountCode, AccountInfo, Chart, Date, EntryLine,
+    JournalEntry, Record, RecordPayload, VoucherMeta, Yen,
 };
 use iikanji_types::auth::{
     Factor, LoginBeginRequest, LoginVerifyRequest, SessionResponse, TotpConfirmRequest,
@@ -684,10 +687,36 @@ fn decode_entries(session: &Option<Session>, records: &[EncRecord]) -> Vec<(Uuid
         .collect()
 }
 
+/// pull した EncRecord 群を DK で復号し、証憑メタのみ (record_id, version, VoucherMeta) を取り出す。
+/// tombstone 済み (ciphertext=None) は除外される。
+fn decode_vouchers(
+    session: &Option<Session>,
+    records: &[EncRecord],
+) -> Vec<(Uuid, u32, VoucherMeta)> {
+    let Some(sess) = session else {
+        return Vec::new();
+    };
+    records
+        .iter()
+        .filter_map(|r| {
+            let ct = r.ciphertext.as_ref()?;
+            let rec = open_record(&sess.dk, r.record_id, r.version, r.record_type, ct).ok()?;
+            match rec.payload {
+                RecordPayload::VoucherMeta(m) => Some((r.record_id, r.version, m)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// 仕訳入力フォーム + 一覧。DK で seal/open し、API で push/pull する E2EE 同期ループ。
 #[component]
 pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
     let entries = RwSignal::new(Vec::<(Uuid, JournalEntry)>::new());
+    // 証憑メタ (record_id, version, meta)。version は tombstone(削除)時の CAS に使う。
+    let vouchers = RwSignal::new(Vec::<(Uuid, u32, VoucherMeta)>::new());
+    // 添付対象の仕訳 record_id (文字列)。
+    let selected_entry = RwSignal::new(String::new());
     let error = RwSignal::new(Option::<String>::None);
     let busy = RwSignal::new(false);
 
@@ -722,8 +751,14 @@ pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
         spawn_local(async move {
             match client.pull(0).await {
                 Ok(resp) => {
-                    let decoded = session.with_value(|s| decode_entries(s, &resp.records));
+                    let (decoded, vs) = session.with_value(|s| {
+                        (
+                            decode_entries(s, &resp.records),
+                            decode_vouchers(s, &resp.records),
+                        )
+                    });
                     entries.set(decoded);
+                    vouchers.set(vs);
                 }
                 Err(e) => error.set(Some(format!("読込に失敗しました: {e}"))),
             }
@@ -790,6 +825,152 @@ pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
                     load();
                 }
                 Err(e) => error.set(Some(format!("保存に失敗しました: {e}"))),
+            }
+            busy.set(false);
+        });
+    };
+
+    // 証憑を添付: ファイル選択時に 読込→暗号化アップロード→VoucherMeta レコード push→再読込。
+    let on_file = move |ev: leptos::ev::Event| {
+        if busy.get() {
+            return;
+        }
+        let entry_id = match Uuid::parse_str(selected_entry.get().trim()) {
+            Ok(id) => id,
+            Err(_) => {
+                error.set(Some("先に対象の仕訳を選んでください".into()));
+                return;
+            }
+        };
+        let input: web_sys::HtmlInputElement = event_target(&ev);
+        let Some(file) = input.files().and_then(|f| f.get(0)) else {
+            return;
+        };
+        let filename = file.name();
+        let mime = file.type_();
+        let Some((client, dk)) =
+            session.with_value(|s| s.as_ref().map(|s| (s.client.clone(), s.dk.clone())))
+        else {
+            return;
+        };
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let bytes = match read_file(file).await {
+                Ok(b) => b,
+                Err(e) => {
+                    error.set(Some(e));
+                    busy.set(false);
+                    return;
+                }
+            };
+            let attachment_id = Uuid::new_v4();
+            let content_hash = sha256(&bytes);
+            let size = bytes.len() as u64;
+            // 暗号 blob を先にアップロードする。
+            if let Err(e) = upload_attachment(&client, &dk, attachment_id, &bytes).await {
+                error.set(Some(format!("アップロードに失敗しました: {e}")));
+                busy.set(false);
+                return;
+            }
+            // VoucherMeta を暗号レコードとして push (仕訳との紐付けは ciphertext 内)。
+            let meta = VoucherMeta {
+                attachment_id: *attachment_id.as_bytes(),
+                linked_entry_id: *entry_id.as_bytes(),
+                filename,
+                mime,
+                size,
+                content_hash,
+                chunk_size: ATTACHMENT_CHUNK_LEN as u32,
+            };
+            let record = Record::new(RecordPayload::VoucherMeta(meta));
+            let voucher_id = Uuid::new_v4();
+            let ct = match seal_record(&dk, voucher_id, 1, &record) {
+                Ok(c) => c,
+                Err(e) => {
+                    error.set(Some(format!("暗号化に失敗しました: {e}")));
+                    busy.set(false);
+                    return;
+                }
+            };
+            let push = PushRequest {
+                changes: vec![PushChange {
+                    record_id: voucher_id,
+                    record_type: record.record_type(),
+                    expected_version: 0,
+                    tombstone: false,
+                    ciphertext: Some(ct),
+                }],
+            };
+            match client.push(&push).await {
+                Ok(_) => load(),
+                Err(e) => error.set(Some(format!("保存に失敗しました: {e}"))),
+            }
+            busy.set(false);
+        });
+    };
+
+    // 証憑をダウンロード: get→復号→真サイズ切り詰め→content hash 検証→ブラウザ保存。
+    let on_download = move |meta: VoucherMeta| {
+        if busy.get() {
+            return;
+        }
+        let Some((client, dk)) =
+            session.with_value(|s| s.as_ref().map(|s| (s.client.clone(), s.dk.clone())))
+        else {
+            return;
+        };
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let attachment_id = Uuid::from_bytes(meta.attachment_id);
+            match download_attachment(
+                &client,
+                &dk,
+                attachment_id,
+                meta.size as usize,
+                &meta.content_hash,
+            )
+            .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = trigger_browser_download(&bytes, &meta.filename, &meta.mime) {
+                        error.set(Some(e));
+                    }
+                }
+                Err(e) => error.set(Some(format!("ダウンロードに失敗しました: {e}"))),
+            }
+            busy.set(false);
+        });
+    };
+
+    // 証憑を削除: VoucherMeta を tombstone (CAS) + blob 削除 → 再読込。
+    let on_delete = move |voucher_id: Uuid, version: u32, attachment_id: Uuid| {
+        if busy.get() {
+            return;
+        }
+        let Some(client) = session.with_value(|s| s.as_ref().map(|s| s.client.clone())) else {
+            return;
+        };
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let push = PushRequest {
+                changes: vec![PushChange {
+                    record_id: voucher_id,
+                    record_type: record_type::VOUCHER_META,
+                    expected_version: version,
+                    tombstone: true,
+                    ciphertext: None,
+                }],
+            };
+            match client.push(&push).await {
+                Ok(_) => {
+                    // blob 本体も削除 (失敗してもメタは tombstone 済み)。
+                    let _ = client.attachment_delete(attachment_id).await;
+                    load();
+                }
+                Err(e) => error.set(Some(format!("削除に失敗しました: {e}"))),
             }
             busy.set(false);
         });
@@ -955,6 +1136,77 @@ pub fn LedgerView(session: StoredValue<Option<Session>>) -> impl IntoView {
                     />
                 </tbody>
             </table>
+
+            <section class="vouchers" data-testid="vouchers">
+                <h3>"証憑(添付)"</h3>
+                <p class="muted">
+                    "ファイルはクライアントで暗号化してから保存されます (サーバーは復号できません)。"
+                </p>
+                <label>
+                    "対象の仕訳"
+                    <select
+                        data-testid="voucher-entry"
+                        prop:value=move || selected_entry.get()
+                        on:change=move |ev| selected_entry.set(event_target_value(&ev))
+                    >
+                        <option value="">"-- 仕訳を選択 --"</option>
+                        {move || {
+                            entries
+                                .get()
+                                .into_iter()
+                                .map(|(id, e)| {
+                                    let label = format!(
+                                        "{:04}-{:02}-{:02} {}",
+                                        e.date.year(),
+                                        e.date.month(),
+                                        e.date.day(),
+                                        e.description,
+                                    );
+                                    view! { <option value=id.to_string()>{label}</option> }
+                                })
+                                .collect::<Vec<_>>()
+                        }}
+                    </select>
+                </label>
+                <label>
+                    "ファイル"
+                    <input
+                        data-testid="voucher-file"
+                        type="file"
+                        on:change=on_file
+                        prop:disabled=move || busy.get()
+                    />
+                </label>
+
+                <ul data-testid="voucher-list">
+                    <For
+                        each=move || vouchers.get()
+                        key=|(id, ver, _)| (*id, *ver)
+                        children=move |(rid, ver, meta)| {
+                            let attachment_id = Uuid::from_bytes(meta.attachment_id);
+                            let meta_dl = meta.clone();
+                            view! {
+                                <li class="voucher-item">
+                                    <span class="voucher-name">{meta.filename.clone()}</span>
+                                    {format!(" ({} bytes) ", meta.size)}
+                                    <button
+                                        data-testid="voucher-download"
+                                        on:click=move |_| on_download(meta_dl.clone())
+                                    >
+                                        "ダウンロード"
+                                    </button>
+                                    <button
+                                        data-testid="voucher-delete"
+                                        on:click=move |_| on_delete(rid, ver, attachment_id)
+                                    >
+                                        "削除"
+                                    </button>
+                                </li>
+                            }
+                        }
+                    />
+                </ul>
+            </section>
         </div>
     }
 }
