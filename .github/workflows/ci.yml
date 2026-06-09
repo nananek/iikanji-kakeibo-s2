@@ -113,14 +113,28 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         if: steps.detect.outputs.have_specs == 'true'
-      - name: Install Trunk + wasm tooling
+      - name: Install Trunk + wasm-bindgen
         if: steps.detect.outputs.have_specs == 'true'
         uses: taiki-e/install-action@v2
         with:
           # trunk 内蔵ダウンローダは release-CDN(github) の 504 で flaky に失敗するため、
-          # wasm-bindgen-cli / wasm-opt を堅牢な installer で事前に PATH へ入れ、TRUNK_OFFLINE で使う。
+          # wasm-bindgen-cli を堅牢な installer で事前に PATH へ入れ、TRUNK_OFFLINE で使う。
           # wasm-bindgen-cli の版は wasm-bindgen crate (Cargo.lock) と一致必須 — bump 時はここも更新。
-          tool: trunk,wasm-bindgen-cli@0.2.122,wasm-opt
+          tool: trunk,wasm-bindgen-cli@0.2.122
+      - name: Install wasm-opt (binaryen, 版固定)
+        if: steps.detect.outputs.have_specs == 'true'
+        # wasm-opt は版を固定する (install-action の wasm-opt は版が揺れて wasm を parse できないことが
+        # ある)。Dockerfile と同じ binaryen version_123 を SHA256 検証して PATH へ入れる。
+        # bump 時は Dockerfile の BINARYEN_VERSION / BINARYEN_SHA256 と揃える。
+        run: |
+          set -eux
+          ver=version_123
+          sha=e959f2170af4c20c552e9de3a0253704d6a9d2766e8fdb88e4d6ac4bae9388fe
+          curl -fsSL --retry 3 --retry-all-errors -o /tmp/binaryen.tgz \
+            "https://github.com/WebAssembly/binaryen/releases/download/${ver}/binaryen-${ver}-x86_64-linux.tar.gz"
+          echo "${sha}  /tmp/binaryen.tgz" | sha256sum -c -
+          tar -xzf /tmp/binaryen.tgz -C /tmp
+          echo "/tmp/binaryen-${ver}/bin" >> "$GITHUB_PATH"
       - name: Build SPA (trunk --release, offline tools)
         if: steps.detect.outputs.have_specs == 'true'
         env:
