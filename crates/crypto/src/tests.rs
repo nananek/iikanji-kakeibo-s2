@@ -310,3 +310,109 @@ fn at_rest_roundtrip_and_binding() {
     assert!(open_at_rest(&key, b"totp/other", &blob).is_err());
     assert!(open_at_rest(&derive_server_key(b"x", b"y"), b"totp/user", &blob).is_err());
 }
+
+// ===== 添付 (chunked AEAD) =====
+
+/// `n` バイトの決定的な擬似データ (テスト用)。
+fn bytes(n: usize) -> Vec<u8> {
+    (0..n).map(|i| (i % 251) as u8).collect()
+}
+
+#[test]
+fn attachment_roundtrip_various_sizes() {
+    let dk = DataKey::generate();
+    let id = [7u8; 16];
+    // 空 / 1 バイト / 半端 / ちょうど 1 チャンク / 1.5 チャンク / 複数チャンク。
+    for &n in &[
+        0usize,
+        1,
+        100,
+        ATTACHMENT_CHUNK_LEN - 1,
+        ATTACHMENT_CHUNK_LEN,
+        ATTACHMENT_CHUNK_LEN + 1,
+        ATTACHMENT_CHUNK_LEN * 3 + 123,
+    ] {
+        let plain = bytes(n);
+        let blob = seal_attachment(&dk, &id, &plain);
+        let opened = open_attachment(&dk, &id, &blob).unwrap();
+        // open はゼロ詰め済みを返す → 真サイズで切り詰めて一致を確認。
+        assert!(opened.len() >= n, "n={n}");
+        assert_eq!(&opened[..n], &plain[..], "roundtrip n={n}");
+        // 詰め分はゼロ。
+        assert!(opened[n..].iter().all(|&b| b == 0), "padding zero n={n}");
+        // ゼロ詰め後の長さは 64KiB の倍数 (size パディング)。
+        assert_eq!(opened.len() % ATTACHMENT_CHUNK_LEN, 0, "n={n}");
+    }
+}
+
+#[test]
+fn attachment_rejects_wrong_id_and_key() {
+    let dk = DataKey::generate();
+    let id = [1u8; 16];
+    let blob = seal_attachment(&dk, &id, &bytes(ATTACHMENT_CHUNK_LEN + 5));
+    // 別 attachment_id・別 DK は復号失敗。
+    assert!(matches!(
+        open_attachment(&dk, &[2u8; 16], &blob),
+        Err(CryptoError::AeadOpen)
+    ));
+    assert!(matches!(
+        open_attachment(&DataKey::generate(), &id, &blob),
+        Err(CryptoError::AeadOpen)
+    ));
+}
+
+#[test]
+fn attachment_detects_tamper() {
+    let dk = DataKey::generate();
+    let id = [9u8; 16];
+    let blob = seal_attachment(&dk, &id, &bytes(ATTACHMENT_CHUNK_LEN + 5));
+    // 末尾(最後のチャンクの tag 近傍) を 1 ビット反転 → AeadOpen。
+    let mut t = blob.clone();
+    let last = t.len() - 1;
+    t[last] ^= 0x01;
+    assert!(matches!(
+        open_attachment(&dk, &id, &t),
+        Err(CryptoError::AeadOpen)
+    ));
+}
+
+#[test]
+fn attachment_detects_chunk_reorder() {
+    let dk = DataKey::generate();
+    let id = [3u8; 16];
+    // 2 つのフル チャンク (= 同一フレーム長) を入れ替える → index/total が AAD と不一致で AeadOpen。
+    let blob = seal_attachment(&dk, &id, &bytes(ATTACHMENT_CHUNK_LEN * 2));
+    let total = u32::from_be_bytes([blob[0], blob[1], blob[2], blob[3]]);
+    assert_eq!(total, 2);
+    let frame_len = u32::from_be_bytes([blob[4], blob[5], blob[6], blob[7]]) as usize;
+    let f0 = 8;
+    let f1 = 8 + frame_len + 4; // 2 つ目の frame_len(4) を飛ばす
+    let mut t = blob.clone();
+    t[f0..f0 + frame_len].copy_from_slice(&blob[f1..f1 + frame_len]);
+    t[f1..f1 + frame_len].copy_from_slice(&blob[f0..f0 + frame_len]);
+    assert!(matches!(
+        open_attachment(&dk, &id, &t),
+        Err(CryptoError::AeadOpen)
+    ));
+}
+
+#[test]
+fn attachment_detects_truncation() {
+    let dk = DataKey::generate();
+    let id = [4u8; 16];
+    let blob = seal_attachment(&dk, &id, &bytes(ATTACHMENT_CHUNK_LEN * 2));
+    // total を 1 に書き換える (チャンク数の偽装) → 各チャンクの AAD total=2 と不一致で AeadOpen。
+    let mut t = blob.clone();
+    t[0..4].copy_from_slice(&1u32.to_be_bytes());
+    assert!(matches!(
+        open_attachment(&dk, &id, &t),
+        Err(CryptoError::AeadOpen)
+    ));
+    // フレームごと切り落とす → 構造異常 (truncated frame)。
+    let frame_len = u32::from_be_bytes([blob[4], blob[5], blob[6], blob[7]]) as usize;
+    let cut = blob[..8 + frame_len].to_vec(); // total=2 のまま 1 フレーム分しかない
+    assert!(matches!(
+        open_attachment(&dk, &id, &cut),
+        Err(CryptoError::Envelope(_))
+    ));
+}

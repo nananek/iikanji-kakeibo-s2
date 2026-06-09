@@ -106,4 +106,15 @@ pub(crate) mod context {
         c.extend_from_slice(&version.to_be_bytes());
         c
     }
+
+    /// 添付チャンクの束縛コンテキスト。`(attachment_id, chunk_index, total_chunks)` を AAD に固定し、
+    /// チャンクの並べ替え・切り詰め・別添付とのすり替えを復号失敗として検出させる。
+    pub(crate) fn attachment_chunk(attachment_id: &[u8; 16], index: u32, total: u32) -> Vec<u8> {
+        let mut c = Vec::with_capacity(15 + 16 + 4 + 4);
+        c.extend_from_slice(b"iikanji/v1/att/");
+        c.extend_from_slice(attachment_id);
+        c.extend_from_slice(&index.to_be_bytes());
+        c.extend_from_slice(&total.to_be_bytes());
+        c
+    }
 }

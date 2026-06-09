@@ -13,6 +13,10 @@ pub enum AppError {
     Unauthorized,
     #[error("conflict: {0}")]
     Conflict(&'static str),
+    #[error("not found")]
+    NotFound,
+    #[error("payload too large")]
+    PayloadTooLarge,
     #[error("too many requests")]
     TooManyRequests,
     #[error("internal error")]
@@ -25,6 +29,8 @@ impl IntoResponse for AppError {
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, *m),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             AppError::Conflict(m) => (StatusCode::CONFLICT, *m),
+            AppError::NotFound => (StatusCode::NOT_FOUND, "not found"),
+            AppError::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload too large"),
             AppError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too many attempts"),
             AppError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };

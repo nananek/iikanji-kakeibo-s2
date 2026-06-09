@@ -43,6 +43,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs"] }
 http-body-util = "0.1"
+# 添付(証憑)バイナリの S3 互換ストレージ抽象。aws backend (versitygw/MinIO/S3) + テスト用 InMemory。
+# fs backend は不要なので default-features off。暗号には不関与 (blob 転送のみ)。
+object_store = { version = "0.13", default-features = false, features = ["aws"] }
 # client (Leptos CSR → WASM)。client crate のみが wasm32 で参照する。
 leptos = { version = "0.8", features = ["csr"] }
 console_error_panic_hook = "0.1"
