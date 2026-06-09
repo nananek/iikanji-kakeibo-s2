@@ -150,9 +150,28 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Start versitygw (添付の S3 互換ストレージ実接続)
+        if: steps.detect.outputs.have_specs == 'true'
+        # 証憑 e2e を in-memory ではなく実 S3 互換ストレージ (versitygw posix) に対して走らせる。
+        # versitygw posix はトップレベル ディレクトリ = バケットなので事前に作成する。
+        run: |
+          set -eux
+          mkdir -p /tmp/s3data/iikanji
+          docker run -d --name versitygw -p 7070:7070 \
+            -v /tmp/s3data:/data \
+            -e ROOT_ACCESS_KEY=iikanji -e ROOT_SECRET_KEY=ci-s3-secret \
+            ghcr.io/versity/versitygw:latest posix /data
+          for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/7070) 2>/dev/null && break; sleep 1; done
       - name: Run Playwright E2E
         if: steps.detect.outputs.have_specs == 'true'
-        # playwright.config.ts の webServer が Rust サーバー + 静的/プロキシサーバーを起動する。
+        # playwright.config.ts の webServer が Rust サーバーを起動する。S3_* で添付を versitygw へ向ける
+        # (config が webServer へ転送)。未設定なら in-memory フォールバック。
+        env:
+          S3_ENDPOINT: http://127.0.0.1:7070
+          S3_BUCKET: iikanji
+          S3_REGION: us-east-1
+          S3_ACCESS_KEY: iikanji
+          S3_SECRET_KEY: ci-s3-secret
         run: |
           npm ci --include=dev
           # firefox: 既存スペック / chromium: passkey の CDP 仮想認証器 e2e。
