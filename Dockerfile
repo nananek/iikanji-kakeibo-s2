@@ -15,6 +15,7 @@
 #                   証憑(添付)バイナリの S3 互換ストレージ (versitygw 等)。未設定だと in-memory
 #                   フォールバック (再起動で消える) — 本番は必ず設定する
 #   MAX_ATTACHMENT_BYTES (既定 25MiB) アップロード可能な暗号 blob の上限
+#   ATTACHMENT_GC_INTERVAL_SECS (既定 3600) 孤立した添付 blob を掃除する GC 間隔。0 で無効
 
 ############################  builder  ############################
 FROM rust:1.96-bookworm AS builder

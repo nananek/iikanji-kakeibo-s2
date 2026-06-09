@@ -27,10 +27,15 @@ pub struct Config {
     pub s3_secret_key: Option<String>,
     /// アップロード可能な暗号 blob の上限 (bytes)。
     pub max_attachment_bytes: usize,
+    /// 孤立した添付 blob を掃除する GC の実行間隔 (秒)。0 で無効。
+    pub attachment_gc_interval_secs: u64,
 }
 
 /// 添付暗号 blob の既定上限 (25 MiB)。
 pub const DEFAULT_MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+
+/// 添付 GC の既定間隔 (1 時間)。
+pub const DEFAULT_ATTACHMENT_GC_INTERVAL_SECS: u64 = 3600;
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Config> {
@@ -64,6 +69,10 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(DEFAULT_MAX_ATTACHMENT_BYTES);
+        let attachment_gc_interval_secs = std::env::var("ATTACHMENT_GC_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_ATTACHMENT_GC_INTERVAL_SECS);
         Ok(Config {
             database_url,
             bind_addr,
@@ -77,6 +86,7 @@ impl Config {
             s3_access_key,
             s3_secret_key,
             max_attachment_bytes,
+            attachment_gc_interval_secs,
         })
     }
 }

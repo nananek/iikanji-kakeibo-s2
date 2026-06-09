@@ -1517,6 +1517,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "futures",
  "http-body-util",
  "iikanji-crypto",
  "iikanji-types",

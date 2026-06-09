@@ -26,6 +26,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use webauthn_rs::prelude::{Url, Webauthn, WebauthnBuilder};
 
+pub use attachments::gc_orphaned_attachments;
 pub use config::Config;
 pub use error::AppError;
 

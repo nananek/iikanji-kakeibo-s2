@@ -3,7 +3,9 @@ use std::path::Path;
 use anyhow::Result;
 use axum::http::{header, HeaderName, HeaderValue};
 use base64::Engine as _;
-use iikanji_server::{build_object_store, connect, migrate, router, AppState, Config};
+use iikanji_server::{
+    build_object_store, connect, gc_orphaned_attachments, migrate, router, AppState, Config,
+};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tower_http::services::{ServeDir, ServeFile};
@@ -62,6 +64,11 @@ async fn main() -> Result<()> {
     state.store = store;
     state.max_attachment_bytes = max_attachment_bytes;
 
+    // 添付 GC の定期実行用に pool / store を取り出す (router(state) で state を move する前に)。
+    let gc_interval = config.attachment_gc_interval_secs;
+    let gc_pool = state.pool.clone();
+    let gc_store = state.store.clone();
+
     // API ルーター。STATIC_DIR があれば SPA(dist) を同一オリジンで配信する
     // (API ルートに当たらないパスは static、未知パスは index.html へ SPA fallback)。
     let mut app = router(state);
@@ -98,6 +105,27 @@ async fn main() -> Result<()> {
                 HeaderValue::from_static("no-referrer"),
             ));
         tracing::info!(static_dir = %dir, "serving SPA from static dir with security headers");
+    }
+
+    // 孤立した添付 blob を定期掃除する GC。grace=1h で起動直後/アップロード途中の blob を守る。
+    // ATTACHMENT_GC_INTERVAL_SECS=0 で無効化。
+    if gc_interval > 0 {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(gc_interval));
+            ticker.tick().await; // 初回 (起動直後) の即時 tick を捨てる
+            loop {
+                ticker.tick().await;
+                match gc_orphaned_attachments(&gc_pool, &gc_store, chrono::Duration::hours(1)).await
+                {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(deleted = n, "attachment GC: removed orphaned blobs")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "attachment GC failed"),
+                }
+            }
+        });
+        tracing::info!(interval_secs = gc_interval, "attachment GC scheduled");
     }
 
     let listener = TcpListener::bind(&config.bind_addr).await?;
