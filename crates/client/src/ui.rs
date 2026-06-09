@@ -10,6 +10,8 @@
 //! 復元した `data_key` はメモリ保持。
 //! 重い Argon2id は [`crate::worker`] (Web Worker) で実行し、メインスレッドを塞がない。
 
+use std::collections::HashMap;
+
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -21,6 +23,7 @@ use crate::attachment_glue::{
     download_attachment, read_file, trigger_browser_download, upload_attachment,
 };
 use crate::crypto_glue::{build_signup_from_pmk, login_keys_from_pmk, unlock_data_key, LoginKeys};
+use crate::migrate::{map_export, parse_export, MigrationPlan};
 use crate::records::{open_record, seal_record};
 use crate::webauthn_glue::{authenticate_passkey, register_passkey};
 use crate::worker::{argon_hash_in_worker, ArgonInput};
@@ -549,8 +552,310 @@ pub fn LedgerShell(
             </header>
             <PasskeyRegister session=session />
             <LedgerView session=session />
+            <MigrationImport session=session />
         </section>
     }
+}
+
+/// 旧 iikanji-kakeibo の export JSON を取り込む UI。ファイルをクライアントで解析・暗号化して
+/// 同期する (平文はサーバーへ出さない)。証憑画像も chunked-AEAD で暗号化アップロードする。
+#[component]
+fn MigrationImport(session: StoredValue<Option<Session>>) -> impl IntoView {
+    // 解析済みプラン (非 Clone 不要だが大きいので StoredValue で保持)。
+    let plan_store = StoredValue::new(None::<MigrationPlan>);
+    // サマリー (件数 + 警告)。None = 未選択。
+    let summary = RwSignal::new(None::<ImportSummary>);
+    let status = RwSignal::new(Option::<Result<String, String>>::None);
+    let busy = RwSignal::new(false);
+
+    // ファイル選択 → 解析 + 写像 → サマリー表示。
+    let on_file = move |ev: leptos::ev::Event| {
+        if busy.get() {
+            return;
+        }
+        let input: web_sys::HtmlInputElement = event_target(&ev);
+        let Some(file) = input.files().and_then(|f| f.get(0)) else {
+            return;
+        };
+        busy.set(true);
+        status.set(None);
+        summary.set(None);
+        spawn_local(async move {
+            let bytes = match read_file(file).await {
+                Ok(b) => b,
+                Err(e) => {
+                    status.set(Some(Err(e)));
+                    busy.set(false);
+                    return;
+                }
+            };
+            let text = match String::from_utf8(bytes) {
+                Ok(t) => t,
+                Err(_) => {
+                    status.set(Some(Err("ファイルが UTF-8 の JSON ではありません".into())));
+                    busy.set(false);
+                    return;
+                }
+            };
+            match parse_export(&text).map(map_export) {
+                Ok(plan) => {
+                    summary.set(Some(ImportSummary::of(&plan)));
+                    plan_store.set_value(Some(plan));
+                }
+                Err(e) => status.set(Some(Err(e.to_string()))),
+            }
+            busy.set(false);
+        });
+    };
+
+    // 取込実行 → 暗号化 + 同期 + 証憑アップロード。
+    let on_import = move |_| {
+        if busy.get() {
+            return;
+        }
+        let mut taken = None;
+        plan_store.update_value(|s| taken = s.take());
+        let Some(plan) = taken else {
+            status.set(Some(Err("先に export ファイルを選択してください".into())));
+            return;
+        };
+        let Some((client, dk)) =
+            session.with_value(|s| s.as_ref().map(|s| (s.client.clone(), s.dk.clone())))
+        else {
+            return;
+        };
+        busy.set(true);
+        status.set(None);
+        summary.set(None);
+        spawn_local(async move {
+            match run_import(&client, &dk, plan).await {
+                Ok(msg) => status.set(Some(Ok(msg))),
+                Err(e) => status.set(Some(Err(e))),
+            }
+            busy.set(false);
+        });
+    };
+
+    view! {
+        <section class="migration" data-testid="migration">
+            <h3>"データ移植（旧 iikanji-kakeibo から）"</h3>
+            <p class="muted">
+                "旧アプリの export JSON を選ぶと、クライアントで暗号化してから取り込みます "
+                "(平文はサーバーに渡りません)。"
+            </p>
+            <label>
+                "export ファイル (.json)"
+                <input
+                    data-testid="migration-file"
+                    type="file"
+                    accept="application/json,.json"
+                    on:change=on_file
+                    prop:disabled=move || busy.get()
+                />
+            </label>
+            {move || {
+                summary
+                    .get()
+                    .map(|s| {
+                        view! {
+                            <div class="migration-summary" data-testid="migration-summary">
+                                <p>
+                                    {format!(
+                                        "仕訳 {} / 科目 {} / 医療費 {} / 締め {} / 証憑 {} 件を取込みます。",
+                                        s.entries,
+                                        s.accounts,
+                                        s.medical,
+                                        s.fiscal,
+                                        s.vouchers,
+                                    )}
+                                </p>
+                                {(!s.warnings.is_empty())
+                                    .then(|| {
+                                        view! {
+                                            <ul class="migration-warnings">
+                                                {s
+                                                    .warnings
+                                                    .iter()
+                                                    .map(|w| view! { <li>{w.clone()}</li> })
+                                                    .collect::<Vec<_>>()}
+                                            </ul>
+                                        }
+                                    })}
+                                <button
+                                    data-testid="migration-import"
+                                    on:click=on_import
+                                    prop:disabled=move || busy.get()
+                                >
+                                    {move || if busy.get() { "取込中…" } else { "取込実行" }}
+                                </button>
+                            </div>
+                        }
+                    })
+            }}
+            {move || {
+                status
+                    .get()
+                    .map(|r| match r {
+                        Ok(m) => {
+                            view! {
+                                <p class="ok" data-testid="migration-status" role="status">
+                                    {m}
+                                </p>
+                            }
+                                .into_any()
+                        }
+                        Err(m) => {
+                            view! {
+                                <p class="error" data-testid="migration-status" role="alert">
+                                    {m}
+                                </p>
+                            }
+                                .into_any()
+                        }
+                    })
+            }}
+        </section>
+    }
+}
+
+/// 取込サマリー (件数 + 警告)。
+#[derive(Clone)]
+struct ImportSummary {
+    entries: usize,
+    accounts: usize,
+    medical: usize,
+    fiscal: usize,
+    vouchers: usize,
+    warnings: Vec<String>,
+}
+
+impl ImportSummary {
+    fn of(plan: &MigrationPlan) -> Self {
+        Self {
+            entries: plan.journal_entries.len(),
+            accounts: plan.accounts.len(),
+            medical: plan.medical.len(),
+            fiscal: plan.fiscal.len(),
+            vouchers: plan.vouchers.len(),
+            warnings: plan.warnings.clone(),
+        }
+    }
+}
+
+/// 一度の push に詰めるレコード数 (sync の body limit 内に収める)。
+const IMPORT_BATCH: usize = 200;
+
+/// レコードを DK で seal して PushChange を作る (新規 = expected_version 0)。
+fn seal_change(dk: &DataKey, record: &Record) -> Result<PushChange, String> {
+    let id = Uuid::new_v4();
+    seal_change_with_id(dk, id, record)
+}
+
+fn seal_change_with_id(dk: &DataKey, id: Uuid, record: &Record) -> Result<PushChange, String> {
+    let ct = seal_record(dk, id, 1, record).map_err(|e| format!("暗号化に失敗しました: {e}"))?;
+    Ok(PushChange {
+        record_id: id,
+        record_type: record.record_type(),
+        expected_version: 0,
+        tombstone: false,
+        ciphertext: Some(ct),
+    })
+}
+
+/// 写像済みプランを暗号化 + 同期 + 証憑アップロードする。結果メッセージを返す。
+async fn run_import(client: &Client, dk: &DataKey, plan: MigrationPlan) -> Result<String, String> {
+    let mut changes: Vec<PushChange> = Vec::new();
+    // 仕訳は key→新 UUID を控える (証憑の紐付けに使う)。
+    let mut entry_uuid: HashMap<String, Uuid> = HashMap::new();
+
+    for acc in plan.accounts {
+        changes.push(seal_change(dk, &Record::new(RecordPayload::Account(acc)))?);
+    }
+    for (key, entry) in plan.journal_entries {
+        let id = Uuid::new_v4();
+        entry_uuid.insert(key, id);
+        changes.push(seal_change_with_id(
+            dk,
+            id,
+            &Record::new(RecordPayload::JournalEntry(entry)),
+        )?);
+    }
+    for med in plan.medical {
+        changes.push(seal_change(dk, &Record::new(RecordPayload::Medical(med)))?);
+    }
+    for fc in plan.fiscal {
+        changes.push(seal_change(
+            dk,
+            &Record::new(RecordPayload::FiscalClose(fc)),
+        )?);
+    }
+
+    let record_count = changes.len();
+    // body limit を超えないよう分割 push。途中失敗時は何件まで同期したかを伝える
+    // (再取込時の重複範囲をユーザーが把握できるように)。
+    let mut synced = 0usize;
+    let mut iter = changes.into_iter();
+    loop {
+        let chunk: Vec<PushChange> = iter.by_ref().take(IMPORT_BATCH).collect();
+        if chunk.is_empty() {
+            break;
+        }
+        let n = chunk.len();
+        client
+            .push(&PushRequest { changes: chunk })
+            .await
+            .map_err(|e| {
+                format!("同期に失敗しました（{synced}/{record_count} 件まで同期済み）: {e}")
+            })?;
+        synced += n;
+    }
+
+    // 証憑: 暗号化アップロード + VoucherMeta レコード。紐付け先が無ければスキップ。
+    let mut voucher_ok = 0usize;
+    let mut voucher_skip = 0usize;
+    for v in plan.vouchers {
+        let Some(&entry_id) = v.entry_key.as_deref().and_then(|k| entry_uuid.get(k)) else {
+            voucher_skip += 1;
+            continue;
+        };
+        let attachment_id = Uuid::new_v4();
+        let content_hash = sha256(&v.data);
+        let size = u64::try_from(v.data.len()).unwrap_or(u64::MAX);
+        upload_attachment(client, dk, attachment_id, &v.data)
+            .await
+            .map_err(|e| {
+                format!("証憑アップロードに失敗しました（レコードは同期済み / 証憑 {voucher_ok} 件まで完了）: {e}")
+            })?;
+        let meta = VoucherMeta {
+            attachment_id: *attachment_id.as_bytes(),
+            linked_entry_id: *entry_id.as_bytes(),
+            filename: v.filename,
+            mime: v.mime,
+            size,
+            content_hash,
+            chunk_size: ATTACHMENT_CHUNK_LEN as u32,
+        };
+        let change = seal_change(dk, &Record::new(RecordPayload::VoucherMeta(meta)))?;
+        client
+            .push(&PushRequest {
+                changes: vec![change],
+            })
+            .await
+            .map_err(|e| {
+                format!("証憑メタの同期に失敗しました（レコードは同期済み / 証憑 {voucher_ok} 件まで完了）: {e}")
+            })?;
+        voucher_ok += 1;
+    }
+
+    Ok(format!(
+        "取込完了: レコード {record_count} 件 / 証憑 {voucher_ok} 件\
+         {}。上の「再読込」で反映されます。",
+        if voucher_skip > 0 {
+            format!(" (紐付け不可の証憑 {voucher_skip} 件はスキップ)")
+        } else {
+            String::new()
+        }
+    ))
 }
 
 /// passkey 登録 UI。ログイン済み (= TOTP gate 済み) セッションで認証器を登録する。

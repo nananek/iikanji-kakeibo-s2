@@ -87,6 +87,30 @@ DATABASE_URL=postgres://... npx playwright test
 
 テスト方針（golden corpus・KAT・E2EE 境界・2FA リプレイ / passkey ゲート 等）の詳細は `CLAUDE.md`。
 
+## データ移植（旧 iikanji-kakeibo から）
+
+旧アプリ（Python/Flask + **平文** Postgres）から、勘定科目 / 仕訳 / 医療費 / 月次締め / 証憑画像を
+移植できる。E2EE のため **移植はユーザーの手元で完結** させる ― 旧 DB の平文はあなたのマシン上だけで扱い、
+新サーバーへ渡るのはクライアントで暗号化した blob のみ。
+
+```sh
+# 1) 旧 Postgres から移植 JSON を吐く（あなたのマシンで）
+cd tools/legacy-export
+python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+# --storage-dir は証憑画像のルート（省略すると証憑なし）。
+python export.py \
+  --database-url postgres://user:pass@localhost:5432/iikanji \
+  --user-email me@example.com \
+  --storage-dir /path/to/legacy/voucher-storage \
+  -o export.json
+
+# 2) 新 SPA にログイン → 画面下部「データ移植」で export.json を選択 → サマリー確認 → 取込実行
+#    クライアントが暗号化して同期する。完了後「再読込」で反映。
+```
+
+`export.json` は財務の平文を含む。**取込後は速やかに削除** すること。詳細・注意（proprietor 科目の扱い・
+借貸不一致のスキップ・二重取込の重複）は `tools/legacy-export/README.md`。
+
 ## デプロイ
 
 `iikanji-server` 単一イメージが API と SPA を同一オリジンで配信し、セキュリティヘッダ（CSP /
