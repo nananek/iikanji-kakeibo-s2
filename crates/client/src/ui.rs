@@ -791,17 +791,23 @@ async fn run_import(client: &Client, dk: &DataKey, plan: MigrationPlan) -> Resul
     }
 
     let record_count = changes.len();
-    // body limit を超えないよう分割 push。
+    // body limit を超えないよう分割 push。途中失敗時は何件まで同期したかを伝える
+    // (再取込時の重複範囲をユーザーが把握できるように)。
+    let mut synced = 0usize;
     let mut iter = changes.into_iter();
     loop {
         let chunk: Vec<PushChange> = iter.by_ref().take(IMPORT_BATCH).collect();
         if chunk.is_empty() {
             break;
         }
+        let n = chunk.len();
         client
             .push(&PushRequest { changes: chunk })
             .await
-            .map_err(|e| format!("同期に失敗しました: {e}"))?;
+            .map_err(|e| {
+                format!("同期に失敗しました（{synced}/{record_count} 件まで同期済み）: {e}")
+            })?;
+        synced += n;
     }
 
     // 証憑: 暗号化アップロード + VoucherMeta レコード。紐付け先が無ければスキップ。
@@ -817,7 +823,9 @@ async fn run_import(client: &Client, dk: &DataKey, plan: MigrationPlan) -> Resul
         let size = v.data.len() as u64;
         upload_attachment(client, dk, attachment_id, &v.data)
             .await
-            .map_err(|e| format!("証憑アップロードに失敗しました: {e}"))?;
+            .map_err(|e| {
+                format!("証憑アップロードに失敗しました（レコードは同期済み / 証憑 {voucher_ok} 件まで完了）: {e}")
+            })?;
         let meta = VoucherMeta {
             attachment_id: *attachment_id.as_bytes(),
             linked_entry_id: *entry_id.as_bytes(),
@@ -833,7 +841,9 @@ async fn run_import(client: &Client, dk: &DataKey, plan: MigrationPlan) -> Resul
                 changes: vec![change],
             })
             .await
-            .map_err(|e| format!("証憑メタの同期に失敗しました: {e}"))?;
+            .map_err(|e| {
+                format!("証憑メタの同期に失敗しました（レコードは同期済み / 証憑 {voucher_ok} 件まで完了）: {e}")
+            })?;
         voucher_ok += 1;
     }
 

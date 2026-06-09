@@ -146,7 +146,7 @@ def fetch_fiscal(cur, user_id):
 def fetch_vouchers(cur, user_id, storage_dir):
     if not storage_dir:
         return []
-    root = Path(storage_dir)
+    root = Path(storage_dir).resolve()
     cur.execute(
         """
         SELECT journal_entry_id, image_key, image_mime, original_filename
@@ -156,7 +156,13 @@ def fetch_vouchers(cur, user_id, storage_dir):
     )
     out = []
     for r in cur.fetchall():
-        path = root / r["image_key"]
+        # image_key は DB 由来。`../` 等で storage_dir 外を読まないよう解決後に内包を検証する。
+        path = (root / r["image_key"]).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            print(f"  パス逸脱のためスキップ: {r['image_key']}", file=sys.stderr)
+            continue
         if not path.is_file():
             print(f"  証憑画像が見つかりません (スキップ): {path}", file=sys.stderr)
             continue
