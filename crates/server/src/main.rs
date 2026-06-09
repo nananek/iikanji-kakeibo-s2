@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use axum::http::{header, HeaderName, HeaderValue};
 use base64::Engine as _;
-use iikanji_server::{connect, migrate, router, AppState, Config};
+use iikanji_server::{build_object_store, connect, migrate, router, AppState, Config};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tower_http::services::{ServeDir, ServeFile};
@@ -48,14 +48,19 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     let pool = connect(&config.database_url).await?;
     migrate(&pool).await?;
+    // 添付ストレージ (S3 互換 / 未設定なら in-memory) を config から構築する。config を move する前に。
+    let store = build_object_store(&config)?;
+    let max_attachment_bytes = config.max_attachment_bytes;
     // WebAuthn の RP ID / origin は config (env) から。非 localhost の http 等の不正設定は
     // ここで起動失敗にする (fail-closed)。
-    let state = AppState::new_with_webauthn(
+    let mut state = AppState::new_with_webauthn(
         pool,
         config.server_secret,
         &config.webauthn_rp_id,
         &config.webauthn_origin,
     )?;
+    state.store = store;
+    state.max_attachment_bytes = max_attachment_bytes;
 
     // API ルーター。STATIC_DIR があれば SPA(dist) を同一オリジンで配信する
     // (API ルートに当たらないパスは static、未知パスは index.html へ SPA fallback)。

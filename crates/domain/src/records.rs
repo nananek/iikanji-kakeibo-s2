@@ -3,6 +3,7 @@
 //!
 //! `serde` feature 有効時のみ含まれる (client/server 連携)。サーバーはこれを復号しない。
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,30 @@ pub mod record_type {
     pub const ACCOUNT: u16 = 2;
     pub const FISCAL_CLOSE: u16 = 3;
     pub const MEDICAL: u16 = 4;
+    pub const VOUCHER_META: u16 = 5;
+}
+
+/// 証憑(添付)のメタデータ。暗号バイナリ本体は別ストア (chunked AEAD blob)、本型は仕訳との紐付けや
+/// ファイル名等を持ち、他のレコードと同様 DK で暗号化されて同期される。**サーバーには平文で出ない**。
+///
+/// `attachment_id` / `linked_entry_id` は UUID を生バイト (`Uuid::into_bytes`) で持つ。domain を外部依存
+/// ゼロに保つため `uuid` 型は使わない (client が変換する)。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoucherMeta {
+    /// 添付バイナリの ID (ストレージのオブジェクトキー / `enc_attachments.attachment_id`)。
+    pub attachment_id: [u8; 16],
+    /// 紐付く仕訳レコードの record_id (この型ごと暗号化されるためサーバーには出ない)。
+    pub linked_entry_id: [u8; 16],
+    /// 元ファイル名 (ユーザー表示用)。
+    pub filename: String,
+    /// MIME タイプ (例 "image/jpeg")。
+    pub mime: String,
+    /// 平文の真サイズ (bytes)。chunked blob はゼロ詰めされるため open 後にこの値で切り詰める。
+    pub size: u64,
+    /// 平文の SHA-256 (ダウンロード後の整合性確認用)。
+    pub content_hash: [u8; 32],
+    /// 暗号化時のチャンク平文長 (bytes)。前方互換のため記録。
+    pub chunk_size: u32,
 }
 
 /// レコード本体 (型別)。
@@ -30,6 +55,7 @@ pub enum RecordPayload {
     Account(AccountInfo),
     FiscalClose(FiscalClose),
     Medical(MedicalExpense),
+    VoucherMeta(VoucherMeta),
 }
 
 impl RecordPayload {
@@ -40,6 +66,7 @@ impl RecordPayload {
             RecordPayload::Account(_) => record_type::ACCOUNT,
             RecordPayload::FiscalClose(_) => record_type::FISCAL_CLOSE,
             RecordPayload::Medical(_) => record_type::MEDICAL,
+            RecordPayload::VoucherMeta(_) => record_type::VOUCHER_META,
         }
     }
 }
@@ -146,6 +173,28 @@ mod tests {
             assert_eq!(rec.record_type(), ty);
             let bytes = encode(rec).unwrap();
             assert_eq!(&decode(&bytes).unwrap(), rec);
+        }
+    }
+
+    #[test]
+    fn voucher_meta_roundtrip() {
+        let meta = VoucherMeta {
+            attachment_id: [1u8; 16],
+            linked_entry_id: [2u8; 16],
+            filename: "領収書.pdf".into(),
+            mime: "application/pdf".into(),
+            size: 123_456,
+            content_hash: [9u8; 32],
+            chunk_size: 65536,
+        };
+        let rec = Record::new(RecordPayload::VoucherMeta(meta.clone()));
+        assert_eq!(rec.record_type(), record_type::VOUCHER_META);
+        let bytes = encode(&rec).unwrap();
+        let back = decode(&bytes).unwrap();
+        assert_eq!(back, rec);
+        match back.payload {
+            RecordPayload::VoucherMeta(m) => assert_eq!(m, meta),
+            _ => panic!("wrong variant"),
         }
     }
 

@@ -36,6 +36,8 @@ base64 = { workspace = true }
 # WebAuthn (passkey 第2要素)。danger-allow-state-serialisation は ceremony 途中状態
 # (PasskeyRegistration/PasskeyAuthentication) を DB に serde 永続化するために必須。
 webauthn-rs = { workspace = true, features = ["danger-allow-state-serialisation"] }
+# 添付バイナリのストレージ (S3 互換 / テストは InMemory)。
+object_store = { workspace = true }
 # webauthn-rs-core が引き込む openssl を vendored (静的リンク) で固める。これにより builder/runtime/CI で
 # libssl-dev / libssl3 / pkg-config に依存せず self-contained にビルドできる (reproducible build 方針)。
 # server コード自体は openssl を直接使わない — vendored feature を有効化するためだけの依存。

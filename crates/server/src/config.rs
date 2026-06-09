@@ -18,7 +18,19 @@ pub struct Config {
     /// WebAuthn の origin (scheme + host + port)。RP ID は origin の登録可能サフィックスである必要がある。
     /// localhost / 127.0.0.1 以外は https 必須 (webauthn-rs が検証 → 不正なら起動失敗で fail-closed)。
     pub webauthn_origin: String,
+    /// 添付バイナリの S3 互換ストレージ設定 (versitygw / MinIO / S3)。未設定なら in-memory に
+    /// フォールバックする (dev/test 用、再起動で消える)。本番は必ず設定する。
+    pub s3_endpoint: Option<String>,
+    pub s3_bucket: Option<String>,
+    pub s3_region: String,
+    pub s3_access_key: Option<String>,
+    pub s3_secret_key: Option<String>,
+    /// アップロード可能な暗号 blob の上限 (bytes)。
+    pub max_attachment_bytes: usize,
 }
+
+/// 添付暗号 blob の既定上限 (25 MiB)。
+pub const DEFAULT_MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Config> {
@@ -39,6 +51,19 @@ impl Config {
             std::env::var("WEBAUTHN_RP_ID").unwrap_or_else(|_| "localhost".to_string());
         let webauthn_origin = std::env::var("WEBAUTHN_ORIGIN")
             .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let s3_endpoint = std::env::var("S3_ENDPOINT").ok().filter(|s| !s.is_empty());
+        let s3_bucket = std::env::var("S3_BUCKET").ok().filter(|s| !s.is_empty());
+        let s3_region = std::env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
+        let s3_access_key = std::env::var("S3_ACCESS_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let s3_secret_key = std::env::var("S3_SECRET_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let max_attachment_bytes = std::env::var("MAX_ATTACHMENT_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MAX_ATTACHMENT_BYTES);
         Ok(Config {
             database_url,
             bind_addr,
@@ -46,6 +71,12 @@ impl Config {
             static_dir,
             webauthn_rp_id,
             webauthn_origin,
+            s3_endpoint,
+            s3_bucket,
+            s3_region,
+            s3_access_key,
+            s3_secret_key,
+            max_attachment_bytes,
         })
     }
 }

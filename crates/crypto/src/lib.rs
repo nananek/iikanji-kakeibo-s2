@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_code)]
 
+mod attachment;
 mod auth;
 mod envelope;
 mod error;
@@ -26,6 +27,7 @@ mod wrap;
 #[cfg(test)]
 mod tests;
 
+pub use attachment::{open_attachment, seal_attachment, ATTACHMENT_CHUNK_LEN};
 pub use auth::{hash_auth_key, verify_auth_key};
 pub use error::{CryptoError, Result};
 pub use kdf::{argon2_hash, derive_pmk, generate_salt, pmk_from_hash, KdfParams, SALT_LEN};

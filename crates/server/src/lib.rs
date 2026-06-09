@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod attachments;
 mod auth;
 pub mod config;
 mod error;
@@ -14,9 +15,13 @@ mod sync;
 
 use std::sync::Arc;
 
-use axum::routing::{get, post};
+use axum::extract::DefaultBodyLimit;
+use axum::routing::{get, post, put};
 use axum::Router;
 use iikanji_crypto::{derive_server_key, hash_auth_key, AuthKey, KdfParams};
+use object_store::aws::AmazonS3Builder;
+use object_store::memory::InMemory;
+use object_store::ObjectStore;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use webauthn_rs::prelude::{Url, Webauthn, WebauthnBuilder};
@@ -35,6 +40,37 @@ pub struct AppState {
     pub dummy_phc: String,
     /// WebAuthn (passkey 第2要素)。セッションを gate するだけで E2EE 鍵ツリーとは無関係。
     pub webauthn: Arc<Webauthn>,
+    /// 添付バイナリの S3 互換ストレージ。クライアント暗号済み blob のみを置き、復号しない。
+    pub store: Arc<dyn ObjectStore>,
+    /// アップロード可能な暗号 blob の上限 (bytes)。
+    pub max_attachment_bytes: usize,
+}
+
+/// 添付ストレージを config から構築する。S3 設定があれば S3 互換 (versitygw 等)、無ければ
+/// in-memory にフォールバックする (dev/test 用)。非 localhost http や設定不整合は起動失敗。
+pub fn build_object_store(config: &Config) -> anyhow::Result<Arc<dyn ObjectStore>> {
+    match (&config.s3_endpoint, &config.s3_bucket) {
+        (Some(endpoint), Some(bucket)) => {
+            let s3 = AmazonS3Builder::new()
+                .with_endpoint(endpoint)
+                .with_bucket_name(bucket)
+                .with_region(&config.s3_region)
+                .with_access_key_id(config.s3_access_key.clone().unwrap_or_default())
+                .with_secret_access_key(config.s3_secret_key.clone().unwrap_or_default())
+                .with_allow_http(endpoint.starts_with("http://"))
+                // path-style (versitygw / MinIO)。
+                .with_virtual_hosted_style_request(false)
+                .build()?;
+            Ok(Arc::new(s3))
+        }
+        _ => {
+            tracing::warn!(
+                "S3_ENDPOINT/S3_BUCKET 未設定 — 添付は in-memory ストアにフォールバック \
+                 (再起動で消える。本番では versitygw 等の S3 を設定すること)"
+            );
+            Ok(Arc::new(InMemory::new()))
+        }
+    }
 }
 
 /// RP ID + origin から `Webauthn` を構築する。非 localhost の http origin 等の不正設定では
@@ -74,6 +110,9 @@ impl AppState {
             totp_key,
             dummy_phc,
             webauthn,
+            // 既定は in-memory ストア (テスト用)。本番は main で config 由来の S3 に差し替える。
+            store: Arc::new(InMemory::new()),
+            max_attachment_bytes: config::DEFAULT_MAX_ATTACHMENT_BYTES,
         })
     }
 }
@@ -102,6 +141,17 @@ pub fn router(state: AppState) -> Router {
         .route("/sync/push", post(sync::push))
         .route("/sync/pull", get(sync::pull))
         .route("/sync/cursor", get(sync::cursor))
+        // 添付は大きめの body を許す (既定 body limit は小さいので当該ルートだけ引き上げる)。
+        .merge(
+            Router::new()
+                .route(
+                    "/attachments/{id}",
+                    put(attachments::put)
+                        .get(attachments::get)
+                        .delete(attachments::delete),
+                )
+                .layer(DefaultBodyLimit::max(state.max_attachment_bytes)),
+        )
         .with_state(state)
 }
 

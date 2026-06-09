@@ -57,7 +57,8 @@ pub use monthly::{
 };
 #[cfg(feature = "serde")]
 pub use records::{
-    decode, encode, record_type, Record, RecordError, RecordPayload, RECORD_SCHEMA_VERSION,
+    decode, encode, record_type, Record, RecordError, RecordPayload, VoucherMeta,
+    RECORD_SCHEMA_VERSION,
 };
 pub use statements::{
     balance_sheet, income_expense_summary, income_statement, BalanceSheet, IncomeExpenseSummary,
